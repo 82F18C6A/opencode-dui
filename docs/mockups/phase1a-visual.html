@@ -1,0 +1,626 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light" data-mode="new">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>opencode-gui · 视觉分层原型</title>
+<style>
+  :root {
+    --bg: #0b0b0c;
+    --surface: #131315;
+    --surface-raised: #1a1a1d;
+    --border: #2a2a2f;
+    --border-strong: #3a3a41;
+    --text: #e9e9ec;
+    --text-dim: #9d9da6;
+    --text-faint: #6a6a73;
+    --accent: #7c9cff;
+    --accent-dim: #3d4a7a;
+    --success: #4ade80;
+    --error: #f87171;
+    --warn: #fbbf24;
+    --radius: 10px;
+    --mono: ui-monospace, "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+    --bubble: #1c1c23;
+    --bubble-border: transparent;
+    --tool-bg: transparent;
+  }
+
+  html[data-theme="light"] {
+    --bg: #f7f7f9;
+    --surface: #ffffff;
+    --surface-raised: #f4f4f6;
+    --border: #e5e5ea;
+    --border-strong: #d4d4da;
+    --text: #1a1a1d;
+    --text-dim: #5f5f68;
+    --text-faint: #8e8e97;
+    --accent: #3b5bdb;
+    --accent-dim: #c5d0f7;
+    --success: #16a34a;
+    --error: #dc2626;
+    --warn: #d97706;
+    --bubble: #ffffff;
+    --bubble-border: #eaeaef;
+    --tool-bg: transparent;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  body {
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* ---------- 控制条 ---------- */
+  .toolbar {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    justify-content: center;
+    padding: 10px 16px;
+    background: color-mix(in srgb, var(--bg) 85%, transparent);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+
+  .seg {
+    display: inline-flex;
+    background: var(--surface-raised);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 2px;
+    gap: 2px;
+  }
+
+  .seg button {
+    appearance: none;
+    border: 0;
+    background: transparent;
+    color: var(--text-dim);
+    font-size: 12px;
+    padding: 5px 12px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-family: inherit;
+    transition: background .15s, color .15s;
+  }
+
+  .seg button:hover { color: var(--text); }
+
+  .seg button[aria-pressed="true"] {
+    background: var(--surface);
+    color: var(--text);
+    box-shadow: 0 1px 2px rgba(0,0,0,.25);
+  }
+
+  .hint {
+    color: var(--text-faint);
+    font-size: 11px;
+  }
+
+  /* ---------- 会话区 ---------- */
+  main {
+    flex: 1;
+    padding: 32px 24px 120px;
+  }
+
+  .conversation {
+    max-width: 780px;
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 28px;
+  }
+
+  /* 用户消息 */
+  .msg-user {
+    align-self: flex-end;
+    max-width: 78%;
+    background: var(--surface-raised);
+    border: 1px solid var(--border);
+    border-radius: 14px 14px 4px 14px;
+    padding: 12px 16px;
+    font-size: 14.5px;
+    line-height: 1.6;
+  }
+
+  .msg-user .who {
+    display: block;
+    font-size: 11px;
+    color: var(--text-faint);
+    margin-bottom: 4px;
+    letter-spacing: .04em;
+  }
+
+  /* 助手消息容器 */
+  .msg-assistant {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  /* ---------- 推理块 ---------- */
+  .reasoning {
+    position: relative;
+    padding-left: 14px;
+    color: var(--text-dim);
+  }
+
+  .reasoning::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 4px;
+    bottom: 4px;
+    width: 2px;
+    border-radius: 2px;
+    background: var(--border-strong);
+  }
+
+  .reasoning-head {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    cursor: pointer;
+    user-select: none;
+    font-size: 12.5px;
+    color: var(--text-faint);
+    width: fit-content;
+    padding: 2px 0;
+  }
+
+  .reasoning-head:hover { color: var(--text-dim); }
+
+  .reasoning-head .chev {
+    transition: transform .18s ease;
+    font-size: 9px;
+    opacity: .8;
+  }
+
+  .reasoning[data-open="true"] .reasoning-head .chev { transform: rotate(90deg); }
+
+  .reasoning-body {
+    display: none;
+    margin-top: 8px;
+    font-size: 13px;
+    line-height: 1.75;
+    color: var(--text-dim);
+    white-space: pre-wrap;
+  }
+
+  .reasoning[data-open="true"] .reasoning-body { display: block; }
+
+  /* ---------- 工具调用卡片 ---------- */
+  .tool {
+    background: var(--tool-bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    transition: border-color .15s;
+  }
+
+  .tool:hover { border-color: var(--border-strong); }
+
+  .tool-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 13px;
+    cursor: pointer;
+    user-select: none;
+    font-size: 12.5px;
+  }
+
+  .tool-icon {
+    width: 16px;
+    height: 16px;
+    flex: none;
+    display: grid;
+    place-items: center;
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+
+  .tool-name {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text);
+    letter-spacing: -.01em;
+  }
+
+  .tool-arg {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--text-faint);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+    min-width: 0;
+  }
+
+  .tool-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11px;
+    color: var(--text-faint);
+    flex: none;
+  }
+
+  .dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--text-faint);
+    flex: none;
+  }
+
+  .dot.done { background: var(--success); }
+  .dot.error { background: var(--error); }
+  .dot.running {
+    background: var(--accent);
+    animation: pulse 1.4s ease-in-out infinite;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: .35; }
+  }
+
+  .tool-chev {
+    font-size: 9px;
+    color: var(--text-faint);
+    transition: transform .18s ease;
+    flex: none;
+  }
+
+  .tool[data-open="true"] .tool-chev { transform: rotate(90deg); }
+
+  .tool-body {
+    display: none;
+    border-top: 1px solid var(--border);
+    padding: 12px 13px;
+    background: var(--surface-raised);
+    font-size: 12px;
+  }
+
+  .tool[data-open="true"] .tool-body { display: block; }
+
+  .tool-section + .tool-section { margin-top: 10px; }
+
+  .tool-label {
+    font-size: 10.5px;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+    margin-bottom: 5px;
+  }
+
+  .tool pre {
+    margin: 0;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    line-height: 1.6;
+    color: var(--text-dim);
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  /* ---------- 答案气泡 ---------- */
+  .answer-bubble {
+    background: var(--bubble);
+    border: 1px solid var(--bubble-border);
+    border-radius: 16px;
+    padding: 16px 20px;
+  }
+
+  html[data-theme="light"] .answer-bubble {
+    box-shadow: 0 1px 2px rgba(20, 20, 30, .06), 0 6px 20px rgba(20, 20, 30, .06);
+  }
+
+  /* ---------- 答案正文 ---------- */
+  .answer {
+    font-size: 14.5px;
+    line-height: 1.78;
+    color: var(--text);
+  }
+
+  .answer p { margin: 0 0 14px; }
+  .answer p:last-child { margin-bottom: 0; }
+
+  .answer h3 {
+    font-size: 15px;
+    margin: 22px 0 10px;
+    font-weight: 600;
+  }
+
+  .answer ul { margin: 0 0 14px; padding-left: 20px; }
+  .answer li { margin-bottom: 6px; }
+  .answer li::marker { color: var(--text-faint); }
+
+  .answer code {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    background: var(--surface-raised);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 1px 5px;
+  }
+
+  .answer pre {
+    margin: 0 0 14px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 14px;
+    overflow-x: auto;
+  }
+
+  .answer pre code {
+    background: none;
+    border: 0;
+    padding: 0;
+    font-size: 12.5px;
+    line-height: 1.65;
+    color: var(--text-dim);
+  }
+
+  .answer strong { font-weight: 600; }
+
+  /* ---------- 官方现状模式 ---------- */
+  /* 所有内容统一成同一层：去掉容器、去掉层级、字号一致 */
+  html[data-mode="official"] .reasoning {
+    padding-left: 0;
+    color: var(--text);
+  }
+
+  html[data-mode="official"] .reasoning::before { display: none; }
+
+  html[data-mode="official"] .reasoning-head {
+    color: var(--text-faint);
+    font-size: 11px;
+    margin-bottom: 4px;
+  }
+
+  html[data-mode="official"] .reasoning[data-open="true"] .reasoning-body {
+    display: block;
+    font-size: 14.5px;
+    line-height: 1.78;
+    color: var(--text);
+  }
+
+  html[data-mode="official"] .tool {
+    background: none;
+    border: 0;
+    border-radius: 0;
+  }
+
+  html[data-mode="official"] .tool-head {
+    padding: 2px 0;
+    color: var(--text);
+    font-size: 14.5px;
+  }
+
+  html[data-mode="official"] .tool-head:hover { background: none; }
+
+  html[data-mode="official"] .tool-name {
+    font-size: 12px;
+    color: var(--text-faint);
+  }
+
+  html[data-mode="official"] .tool-arg {
+    font-size: 12px;
+    color: var(--text-faint);
+  }
+
+  html[data-mode="official"] .tool-status { display: none; }
+  html[data-mode="official"] .tool-chev { display: none; }
+  html[data-mode="official"] .tool-icon { color: var(--text-faint); }
+
+  html[data-mode="official"] .tool[data-open="true"] .tool-body {
+    border-top: 0;
+    background: none;
+    padding: 4px 0 4px 26px;
+  }
+
+  html[data-mode="official"] .tool-section { margin-top: 6px; }
+
+  html[data-mode="official"] .msg-assistant { gap: 4px; }
+
+  html[data-mode="official"] .answer { margin-top: 2px; }
+
+  html[data-mode="official"] .answer-bubble {
+    background: none;
+    border: 0;
+    border-radius: 0;
+    padding: 0;
+  }
+</style>
+</head>
+<body>
+
+<div class="toolbar">
+  <div class="seg" role="group" aria-label="显示模式">
+    <button id="btn-new" aria-pressed="true">新方案</button>
+    <button id="btn-official" aria-pressed="false">官方现状</button>
+  </div>
+  <div class="seg" role="group" aria-label="主题">
+    <button id="btn-dark" aria-pressed="false">暗色</button>
+    <button id="btn-light" aria-pressed="true">亮色</button>
+  </div>
+  <span class="hint">点「思考」「工具」展开；切换模式对比差别</span>
+</div>
+
+<main>
+  <div class="conversation">
+
+    <div class="msg-user">
+      <span class="who">你</span>
+      帮我把这个项目里的 shell 调用从 pwsh 换成 bash，顺便看下沙箱会不会挡。
+    </div>
+
+    <div class="msg-assistant">
+
+      <div class="reasoning" data-open="false">
+        <div class="reasoning-head" data-toggle="reasoning">
+          <span class="chev">▶</span>
+          <span>思考了 8 秒</span>
+        </div>
+        <div class="reasoning-body">先确认两件事：一是 Windows 上 bash 能不能起，二是沙箱是怎么限制的。从之前的结论看，DSH 用的是受限令牌，MSYS2 需要创建命名对象，大概率会被挡。先看代码里 shell 是怎么调的。</div>
+      </div>
+
+      <div class="tool" data-open="false">
+        <div class="tool-head" data-toggle="tool">
+          <span class="tool-icon">⌕</span>
+          <span class="tool-name">grep</span>
+          <span class="tool-arg">"pwsh" · src/</span>
+          <span class="tool-status"><span class="dot done"></span>12 处</span>
+          <span class="tool-chev">▶</span>
+        </div>
+        <div class="tool-body">
+          <div class="tool-section">
+            <div class="tool-label">参数</div>
+            <pre>pattern: "pwsh"
+path: "src/"
+include: "*.ts"</pre>
+          </div>
+          <div class="tool-section">
+            <div class="tool-label">输出</div>
+            <pre>src/shell/spawn.ts:42   const shell = "pwsh"
+src/shell/spawn.ts:88   args: ["-NoProfile", "-Command", cmd]
+src/tools/bash.ts:15    name: "pwsh"</pre>
+          </div>
+        </div>
+      </div>
+
+      <div class="tool" data-open="true">
+        <div class="tool-head" data-toggle="tool">
+          <span class="tool-icon">▸</span>
+          <span class="tool-name">bash</span>
+          <span class="tool-arg">bash -c "echo ok"</span>
+          <span class="tool-status"><span class="dot error"></span>失败</span>
+          <span class="tool-chev">▶</span>
+        </div>
+        <div class="tool-body">
+          <div class="tool-section">
+            <div class="tool-label">参数</div>
+            <pre>command: "bash -c \"echo ok\""
+timeoutMs: 30000</pre>
+          </div>
+          <div class="tool-section">
+            <div class="tool-label">输出 · exit 5</div>
+            <pre>fatal error - couldn't create signal pipe, Win32 error 5
+0xC0000022 (Access Denied)</pre>
+          </div>
+        </div>
+      </div>
+
+      <div class="tool" data-open="false">
+        <div class="tool-head" data-toggle="tool">
+          <span class="tool-icon">✎</span>
+          <span class="tool-name">edit_file</span>
+          <span class="tool-arg">src/shell/spawn.ts</span>
+          <span class="tool-status"><span class="dot done"></span>1 处</span>
+          <span class="tool-chev">▶</span>
+        </div>
+        <div class="tool-body">
+          <div class="tool-section">
+            <div class="tool-label">变更</div>
+            <pre>- const shell = "pwsh"
++ const shell = "bash"</pre>
+          </div>
+        </div>
+      </div>
+
+      <div class="answer-bubble">
+      <div class="answer">
+        <p>已经改完了，但<b>沙箱那关是硬限制</b>，不是配置问题。</p>
+        <p>具体说：</p>
+        <ul>
+          <li>代码里 12 处 `pwsh` 已改成 `bash`，默认 shell 指向 Git Bash</li>
+          <li>启动时仍会失败——受限令牌不允许 MSYS 创建信号管道</li>
+          <li>这不是 DSH 的 bug，是 <code>WRITE_RESTRICTED</code> 令牌的固有边界</li>
+        </ul>
+        <h3>可行的做法</h3>
+        <p>把 bash 放进 WSL，用 bwrap 在 Linux 层做隔离：</p>
+        <pre><code>wsl.exe -e bash -lc "bwrap --ro-bind /usr /usr \
+  --bind /mnt/c/Users/me/project /work \
+  --chdir /work bash"</code></pre>
+        <p>这样既保住 bash，也没丢掉写限制。要我再改一版吗？</p>
+      </div>
+      </div>
+
+    </div>
+
+  </div>
+</main>
+
+<script>
+  const html = document.documentElement;
+  const params = new URLSearchParams(location.search);
+
+  // 截图参数：mode=new|official, theme=dark|light, chrome=off, expand=reasoning
+  if (params.get('mode')) html.dataset.mode = params.get('mode');
+  if (params.get('theme')) html.dataset.theme = params.get('theme');
+  if (params.get('chrome') === 'off') {
+    const bar = document.querySelector('.toolbar');
+    if (bar) bar.style.display = 'none';
+  }
+  if (params.get('expand') === 'reasoning') {
+    document.querySelectorAll('.reasoning').forEach((r) => { r.dataset.open = 'true'; });
+  }
+
+  document.querySelectorAll('[data-toggle]').forEach((head) => {
+    head.addEventListener('click', () => {
+      const block = head.closest('[data-open]');
+      if (!block) return;
+      block.dataset.open = block.dataset.open === 'true' ? 'false' : 'true';
+    });
+  });
+
+  const modes = [
+    ['btn-new', 'new'],
+    ['btn-official', 'official'],
+  ];
+  modes.forEach(([id, value]) => {
+    document.getElementById(id).addEventListener('click', () => {
+      html.dataset.mode = value;
+      modes.forEach(([bid, v]) => {
+        document.getElementById(bid).setAttribute('aria-pressed', String(v === value));
+      });
+    });
+  });
+
+  const themes = [
+    ['btn-dark', 'dark'],
+    ['btn-light', 'light'],
+  ];
+  themes.forEach(([id, value]) => {
+    document.getElementById(id).addEventListener('click', () => {
+      html.dataset.theme = value;
+      themes.forEach(([bid, v]) => {
+        document.getElementById(bid).setAttribute('aria-pressed', String(v === value));
+      });
+    });
+  });
+</script>
+
+</body>
+</html>

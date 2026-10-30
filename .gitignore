@@ -1,0 +1,12 @@
+node_modules/
+out/
+dist/
+.npm-cache/
+.electron-cache/
+.pnpm-store/
+.tmp/
+*.log
+.idea/
+v-err.txt
+v-out.txt
+tools/exports/
