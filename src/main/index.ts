@@ -84,7 +84,7 @@ async function boot(): Promise<void> {
     minWidth: 960,
     minHeight: 640,
     title: 'opencode',
-    backgroundColor: '#f7f7f9',
+    backgroundColor: '#eef3ff',
     webPreferences: {
       partition: PARTITION,
       preload: join(__dirname, '../preload/index.js'),

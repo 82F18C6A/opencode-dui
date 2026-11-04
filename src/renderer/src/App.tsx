@@ -58,6 +58,30 @@ function saveWorkspaces(list: string[]) {
   }
 }
 
+const REMOVED_KEY = 'opencode.removedWorkspaces'
+
+/** 读取已移除的工作目录 */
+function loadRemoved(): string[] {
+  try {
+    const raw = localStorage.getItem(REMOVED_KEY)
+    const parsed = raw ? JSON.parse(raw) : []
+    return Array.isArray(parsed)
+      ? parsed.filter((item): item is string => typeof item === 'string')
+      : []
+  } catch {
+    return []
+  }
+}
+
+/** 写回已移除的工作目录 */
+function saveRemoved(list: string[]) {
+  try {
+    localStorage.setItem(REMOVED_KEY, JSON.stringify(list))
+  } catch {
+    // 写不进去时忽略
+  }
+}
+
 /** 取路径最后一段作为显示名 */
 function pathName(directory: string): string {
   if (!directory) return '未指定目录'
@@ -80,14 +104,30 @@ export default function App() {
   const [running, setRunning] = createSignal<Record<string, true>>({})
   const [interrupting, setInterrupting] = createSignal(false)
   const [interruptNotice, setInterruptNotice] = createSignal<string | null>(null)
+  // 更早消息的游标，来自最近一页的 cursor.next
+  const [olderCursor, setOlderCursor] = createSignal<string | null>(null)
+  const [loadingOlder, setLoadingOlder] = createSignal(false)
+  const [atBottom, setAtBottom] = createSignal(true)
+  // 当前读到的用户提问序号，用于刻度高亮
+  const [currentPromptIndex, setCurrentPromptIndex] = createSignal(0)
   // 本地登记的工作目录，服务端项目与会话目录会合并进来
   const [localWorkspaces, setLocalWorkspaces] = createSignal<string[]>(loadWorkspaces())
   const [projects, setProjects] = createSignal<string[]>([])
   // 折叠的工作目录，key 为小写路径
   const [collapsed, setCollapsed] = createSignal<Record<string, true>>({})
+  // 已删除的工作目录，避免服务端项目把它带回来
+  const [removedWorkspaces, setRemovedWorkspaces] = createSignal<string[]>(loadRemoved())
+  const [deletingWorkspace, setDeletingWorkspace] = createSignal<string | null>(null)
+  // 已归档会话弹层
+  const [archivedOpen, setArchivedOpen] = createSignal(false)
+  const [archivedSessions, setArchivedSessions] = createSignal<Session[]>([])
+  // 就地重命名
+  const [renamingId, setRenamingId] = createSignal<string | null>(null)
+  const [renameText, setRenameText] = createSignal('')
 
   let client: any = null
   let scroller: HTMLDivElement | undefined
+  let navPanel: HTMLDivElement | undefined
   let reloadTimer: ReturnType<typeof setTimeout> | undefined
   let pollTimer: ReturnType<typeof setInterval> | undefined
 
@@ -100,6 +140,16 @@ export default function App() {
   })
 
   const activeWorkspace = createMemo(() => activeSession()?.location?.directory ?? null)
+  const hasMore = createMemo(() => Boolean(olderCursor()))
+  // 右侧导航条只列用户提问
+  const userPrompts = createMemo(() =>
+    messages()
+      .filter((message) => message?.type === 'user')
+      .map((message) => ({
+        id: String(message?.id ?? ''),
+        text: String(message?.text ?? '').replace(/\s+/g, ' ').trim(),
+      })),
+  )
 
   // 工作目录 → 会话的两级分组
   const workspaceGroups = createMemo<WorkspaceGroup[]>(() => {
@@ -116,7 +166,10 @@ export default function App() {
 
     // 本地登记的排前面，其次是服务端已有项目的目录
     for (const directory of localWorkspaces()) ensure(directory)
-    for (const directory of projects()) ensure(directory)
+    const removed = new Set(removedWorkspaces())
+    for (const directory of projects()) {
+      if (!removed.has(directory.toLowerCase())) ensure(directory)
+    }
 
     const orphans: Session[] = []
     for (const session of sessions()) {
@@ -155,18 +208,86 @@ export default function App() {
     )
   })
 
-  async function refreshMessages() {
+  async function refreshMessages(resetCursor = false) {
     const id = activeId()
     if (!client || !id) return
     // 服务端默认倒序返回最近一页，反转成旧→新，与流式追加和滚动方向一致
     const res = await client.message.list({ sessionID: id, order: 'desc' })
+    if (activeId() !== id) return
+
     const server = [...(res.data ?? [])].reverse()
+    if (resetCursor) {
+      // desc 页里 next 才指向更早的消息，previous 是更新方向
+      setOlderCursor(res.cursor?.next ?? null)
+    }
+
     setMessages((prev) => {
-      // 服务端可能还没落库正在流式的消息，保留本地那条避免闪烁
       const known = new Set(server.map((m: any) => m.id))
-      const pending = prev.filter((m) => m?.id && !known.has(m.id) && m.type === 'assistant')
-      return pending.length ? [...server, ...pending] : server
+      const firstCreated = server[0]?.time?.created ?? 0
+      // 已经翻出来的更早消息留在前面
+      const older = prev.filter(
+        (m) => m?.id && !known.has(m.id) && (m.time?.created ?? 0) < firstCreated,
+      )
+      const olderIds = new Set(older.map((m) => m.id))
+      // 服务端可能还没落库正在流式的消息，保留本地那条避免闪烁
+      const pending = prev.filter(
+        (m) => m?.id && !known.has(m.id) && !olderIds.has(m.id) && m.type === 'assistant',
+      )
+      return [...older, ...server, ...pending]
     })
+  }
+
+  /** 找到视口里第一个可见的消息元素 */
+  function firstVisibleMessage(): HTMLElement | undefined {
+    if (!scroller) return
+    const top = scroller.getBoundingClientRect().top
+    for (const child of Array.from(scroller.children)) {
+      const element = child as HTMLElement
+      if (element.getBoundingClientRect().bottom > top) return element
+    }
+    return undefined
+  }
+
+  /** 往上加载更早的一页，保持视口位置 */
+  async function loadOlder() {
+    const id = activeId()
+    const cursor = olderCursor()
+    if (!client || !id || !cursor || loadingOlder()) return
+
+    setLoadingOlder(true)
+    try {
+      const res: any = await client.message.list({ sessionID: id, cursor })
+      if (activeId() !== id) return
+
+      const batch = [...(res.data ?? [])].reverse()
+      setOlderCursor(res.cursor?.next ?? null)
+
+      // 以当前可见消息为锚点，插入后按它的位移补 scrollTop
+      const anchor = firstVisibleMessage()
+      const anchorTop = anchor?.getBoundingClientRect().top ?? 0
+      stickToBottom = false
+      suppressOlder = true
+      setMessages((prev) => {
+        const known = new Set(prev.map((m: any) => m.id))
+        const fresh = batch.filter((m: any) => m?.id && !known.has(m.id))
+        return fresh.length ? [...fresh, ...prev] : prev
+      })
+
+      queueMicrotask(() => {
+        if (scroller && anchor) {
+          scroller.scrollTop += anchor.getBoundingClientRect().top - anchorTop
+        }
+        // 补偿是瞬时的，立即解除抑制；若这一页不够高、视口仍在顶部，
+        // 主动继续加载下一页，不依赖后续滚动事件
+        suppressOlder = false
+        if (scroller && scroller.scrollTop < 60) void loadOlder()
+      })
+    } catch {
+      suppressOlder = false
+      // 加载失败不打断阅读，下次滚动再试
+    } finally {
+      setLoadingOlder(false)
+    }
   }
 
   async function refreshPermissions() {
@@ -217,6 +338,13 @@ export default function App() {
       const next = [picked, ...localWorkspaces()]
       setLocalWorkspaces(next)
       saveWorkspaces(next)
+    }
+
+    // 重新加回曾被删除的目录时，去掉忽略标记
+    const nextRemoved = removedWorkspaces().filter((dir) => dir !== key)
+    if (nextRemoved.length !== removedWorkspaces().length) {
+      setRemovedWorkspaces(nextRemoved)
+      saveRemoved(nextRemoved)
     }
     expandWorkspace(picked)
   }
@@ -283,11 +411,15 @@ export default function App() {
   }
 
   async function openSession(id: string) {
-    setActiveId(id)
+    if (id !== activeId()) {
+      setActiveId(id)
+      setMessages([])
+      setOlderCursor(null)
+    }
     setInterruptNotice(null)
     const directory = sessions().find((session) => session.id === id)?.location?.directory
     if (directory) expandWorkspace(directory)
-    await refreshMessages()
+    await refreshMessages(true)
   }
 
   function scheduleReload() {
@@ -304,7 +436,7 @@ export default function App() {
       if (!endpoint) throw new Error('主进程没有返回服务端点')
 
       client = OpenCode.make({ baseUrl: endpoint.url, headers: endpoint.headers })
-      const res = await client.session.list()
+      const res = await client.session.list({ archived: false })
       setSessions(res.data ?? [])
       void client.model
         .list()
@@ -393,7 +525,7 @@ export default function App() {
         sessionID: id,
         model: { id: model.id, providerID: model.providerID },
       })
-      const res = await client.session.list()
+      const res = await client.session.list({ archived: false })
       setSessions(res.data ?? [])
     } catch (error) {
       setErrorText(error instanceof Error ? error.message : String(error))
@@ -414,13 +546,196 @@ export default function App() {
         ...(model ? { model } : {}),
         location: { directory: target },
       })
-      const res = await client.session.list()
+      const res = await client.session.list({ archived: false })
       setSessions(res.data ?? [])
       expandWorkspace(target)
       await openSession(session.id)
     } catch (error) {
       setErrorText(error instanceof Error ? error.message : String(error))
     }
+  }
+
+  async function refreshSessions() {
+    if (!client) return
+    const res = await client.session.list({ archived: false })
+    setSessions(res.data ?? [])
+  }
+
+  /** 归档会话，归档后从列表隐藏 */
+  async function archiveSession(id: string) {
+    if (!client) return
+    try {
+      await client.session.update({ sessionID: id, archived: true })
+      const wasActive = activeId() === id
+      const res = await client.session.list({ archived: false })
+      const list = res.data ?? []
+      setSessions(list)
+      if (wasActive) {
+        if (list[0]) await openSession(list[0].id)
+        else {
+          setActiveId(null)
+          setMessages([])
+        }
+      }
+    } catch (error) {
+      setErrorText(error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  /** 打开已归档列表 */
+  async function openArchived() {
+    if (!client) return
+    setArchivedOpen(true)
+    try {
+      const res: any = await client.session.list({ archived: true })
+      setArchivedSessions(res.data ?? [])
+    } catch {
+      setArchivedSessions([])
+    }
+  }
+
+  /** 恢复已归档会话 */
+  async function restoreSession(id: string) {
+    if (!client) return
+    try {
+      await client.session.update({ sessionID: id, archived: false })
+      await openArchived()
+      await refreshSessions()
+    } catch (error) {
+      setErrorText(error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  /** 永久删除会话 */
+  async function deleteSession(id: string) {
+    if (!client) return
+    try {
+      await client.session.remove({ sessionID: id })
+      await openArchived()
+      await refreshSessions()
+    } catch (error) {
+      setErrorText(error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  /** 弹出删除工作目录确认 */
+  function requestDeleteWorkspace(directory: string) {
+    setDeletingWorkspace(directory)
+  }
+
+  /** 删除工作目录：归档目录下的会话并移出侧边栏 */
+  async function confirmDeleteWorkspace() {
+    const directory = deletingWorkspace()
+    if (!directory || !client) return
+    const group = workspaceGroups().find(
+      (item) => item.directory.toLowerCase() === directory.toLowerCase(),
+    )
+    const targets = group?.sessions ?? []
+
+    try {
+      for (const session of targets) {
+        await client.session.update({ sessionID: session.id, archived: true })
+      }
+
+      const nextLocal = localWorkspaces().filter(
+        (dir) => dir.toLowerCase() !== directory.toLowerCase(),
+      )
+      setLocalWorkspaces(nextLocal)
+      saveWorkspaces(nextLocal)
+
+      const nextRemoved = Array.from(new Set([...removedWorkspaces(), directory.toLowerCase()]))
+      setRemovedWorkspaces(nextRemoved)
+      saveRemoved(nextRemoved)
+
+      setDeletingWorkspace(null)
+      const res = await client.session.list({ archived: false })
+      const list = res.data ?? []
+      setSessions(list)
+      if (targets.some((session) => session.id === activeId())) {
+        if (list[0]) await openSession(list[0].id)
+        else {
+          setActiveId(null)
+          setMessages([])
+        }
+      }
+    } catch (error) {
+      setDeletingWorkspace(null)
+      setErrorText(error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  /** 双击标题进入就地编辑 */
+  function beginRename(session: Session) {
+    setRenamingId(session.id)
+    setRenameText(session.title ?? '')
+  }
+
+  function cancelRename() {
+    setRenamingId(null)
+  }
+
+  async function commitRename() {
+    const id = renamingId()
+    if (!id) return
+    const title = renameText().trim()
+    setRenamingId(null)
+    if (!title) return
+    try {
+      await client.session.update({ sessionID: id, title })
+      await refreshSessions()
+    } catch (error) {
+      setErrorText(error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  /** 根据滚动位置更新当前读到的提问序号 */
+  function updateCurrentPrompt() {
+    if (!scroller) return
+    const nodes = scroller.querySelectorAll<HTMLElement>('.msg-user')
+    if (!nodes.length) return
+    const marker = scroller.getBoundingClientRect().top + scroller.clientHeight / 2
+    let index = 0
+    nodes.forEach((node, i) => {
+      if (node.getBoundingClientRect().top <= marker) index = i
+    })
+    setCurrentPromptIndex(index)
+  }
+
+  /** 打开导航面板时把当前项滚进可视区 */
+  function revealCurrentPrompt() {
+    queueMicrotask(() => {
+      const item = navPanel?.querySelector<HTMLElement>('.nav-item.current')
+      item?.scrollIntoView({ block: 'nearest' })
+    })
+  }
+
+  /** 跳到某条用户提问并高亮，滚动结束后再出现高亮 */
+  function jumpToPrompt(index: number) {
+    const nodes = scroller?.querySelectorAll<HTMLElement>('.msg-user')
+    const node = nodes?.[index]
+    if (!node || !scroller) return
+
+    let shown = false
+    const showFlash = () => {
+      if (shown) return
+      shown = true
+      scroller?.removeEventListener('scrollend', showFlash)
+      node.classList.add('flash')
+      setTimeout(() => node.classList.remove('flash'), 3000)
+    }
+
+    // 目标已在视口内就直接高亮，否则等滚动结束
+    const view = scroller.getBoundingClientRect()
+    const rect = node.getBoundingClientRect()
+    if (rect.top >= view.top && rect.bottom <= view.bottom) {
+      showFlash()
+    } else {
+      scroller.addEventListener('scrollend', showFlash, { once: true })
+      // scrollend 不触发时的兜底
+      setTimeout(showFlash, 2000)
+    }
+
+    node.scrollIntoView({ block: 'center', behavior: 'smooth' })
   }
 
   /** 把流式增量直接追加到本地消息，避免整条重拉 */
@@ -514,13 +829,26 @@ export default function App() {
 
   // 内容变化时跟随底部，但用户往上翻时不打扰
   let stickToBottom = true
+  let suppressOlder = false
   function onMessagesScroll() {
     if (!scroller) return
-    stickToBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 48
+    const distance = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight
+    stickToBottom = distance < 48
+    setAtBottom(distance < 160)
+    // 滚到顶部附近就加载更早的一页
+    if (scroller.scrollTop < 60 && !suppressOlder) void loadOlder()
+    updateCurrentPrompt()
+  }
+
+  /** 回到最新消息 */
+  function scrollToBottom() {
+    stickToBottom = true
+    scroller?.scrollTo({ top: scroller.scrollHeight, behavior: 'smooth' })
   }
 
   createEffect(() => {
     messages()
+    queueMicrotask(updateCurrentPrompt)
     if (!stickToBottom || !scroller) return
     queueMicrotask(() => {
       if (stickToBottom) scroller?.scrollTo({ top: scroller.scrollHeight })
@@ -531,28 +859,46 @@ export default function App() {
     <div class="app">
       <aside class="sidebar">
         <div class="brand">opencode</div>
+        <button class="new-workspace" onClick={() => void addWorkspace()}>
+          + 新建工作目录
+        </button>
         <div class="session-list">
           <For each={workspaceGroups()}>
             {(group) => {
               const open = () => !collapsed()[group.directory.toLowerCase()]
               return (
                 <div class="workspace">
-                  <div class="workspace-head">
+                  <div class="workspace-head" classList={{ orphan: group.orphan }}>
                     <button
                       class="workspace-toggle"
                       title={group.directory || '未指定目录'}
                       onClick={() => toggleWorkspace(group.directory)}
                     >
                       <span class="workspace-chev">{open() ? '▾' : '▸'}</span>
+                      <svg class="workspace-icon" viewBox="0 0 24 24" aria-hidden="true">
+                        <path d="M3.5 7.5a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z" />
+                      </svg>
                       <span class="workspace-name">{pathName(group.directory)}</span>
                     </button>
                     <Show when={!group.orphan}>
+                      <button
+                        class="workspace-delete"
+                        title="删除工作目录（会话会归档）"
+                        onClick={() => requestDeleteWorkspace(group.directory)}
+                      >
+                        <svg viewBox="0 0 24 24" aria-hidden="true">
+                          <path d="M5 7h14M10 7V5h4v2M7.5 7l.8 12h7.4l.8-12" />
+                        </svg>
+                      </button>
                       <button
                         class="workspace-add"
                         title="在这个目录下新建会话"
                         onClick={() => void createSession(group.directory)}
                       >
-                        +
+                        <svg viewBox="0 0 24 24" aria-hidden="true">
+                          <circle cx="12" cy="12" r="8.5" />
+                          <path d="M12 8.5v7M8.5 12h7" />
+                        </svg>
                       </button>
                     </Show>
                   </div>
@@ -563,13 +909,52 @@ export default function App() {
                     >
                       <For each={group.sessions}>
                         {(session) => (
-                          <button
-                            class="session-item"
-                            classList={{ active: session.id === activeId() }}
-                            onClick={() => void openSession(session.id)}
-                          >
-                            <span class="session-title">{session.title || '未命名会话'}</span>
-                          </button>
+                          <div class="session-row" classList={{ active: session.id === activeId() }}>
+                            <Show
+                              when={renamingId() === session.id}
+                              fallback={
+                                <button class="session-item" onClick={() => void openSession(session.id)}>
+                                  <span
+                                    class="session-title"
+                                    onDblClick={(event) => {
+                                      event.stopPropagation()
+                                      beginRename(session)
+                                    }}
+                                  >
+                                    {session.title || '未命名会话'}
+                                  </span>
+                                </button>
+                              }
+                            >
+                              <input
+                                class="session-rename"
+                                value={renameText()}
+                                ref={(el) => queueMicrotask(() => el.select())}
+                                onInput={(event) => setRenameText(event.currentTarget.value)}
+                                onBlur={() => void commitRename()}
+                                onKeyDown={(event) => {
+                                  if (event.key === 'Enter') {
+                                    event.preventDefault()
+                                    void commitRename()
+                                  } else if (event.key === 'Escape') {
+                                    cancelRename()
+                                  }
+                                }}
+                              />
+                            </Show>
+                            <button
+                              class="session-archive"
+                              title="归档"
+                              onClick={(event) => {
+                                event.stopPropagation()
+                                void archiveSession(session.id)
+                              }}
+                            >
+                              <svg viewBox="0 0 24 24" aria-hidden="true">
+                                <path d="M4 7h16M5.5 7v11.5h13V7M9 11h6" />
+                              </svg>
+                            </button>
+                          </div>
                         )}
                       </For>
                     </Show>
@@ -579,8 +964,8 @@ export default function App() {
             }}
           </For>
         </div>
-        <button class="new-workspace" onClick={() => void addWorkspace()}>
-          + 新建工作目录
+        <button class="archived-entry" onClick={() => void openArchived()}>
+          已归档
         </button>
       </aside>
 
@@ -590,13 +975,6 @@ export default function App() {
             <span class="topbar-title">{activeSession()?.title ?? '未命名会话'}</span>
             <span class="topbar-dir">{activeSession()?.location?.directory ?? ''}</span>
           </Show>
-          <div class="topbar-spacer" />
-          <button class="model-button" disabled={!activeId()} onClick={() => setPickerOpen(true)}>
-            {currentModel()?.name ?? '选择模型'}
-          </button>
-          <button class="new-session" disabled={!activeWorkspace()} onClick={() => void createSession()}>
-            新建会话
-          </button>
         </header>
 
         <Show when={phase() === 'loading'}>
@@ -615,6 +993,38 @@ export default function App() {
             </Show>
           </div>
 
+          <Show when={userPrompts().length}>
+            <div class="nav-zone" onMouseEnter={revealCurrentPrompt}>
+              <div class="nav-ticks">
+                <For each={userPrompts()}>
+                  {(_, index) => (
+                    <span class="nav-tick" classList={{ current: index() === currentPromptIndex() }} />
+                  )}
+                </For>
+              </div>
+              <div class="message-nav" ref={navPanel}>
+                <For each={userPrompts()}>
+                  {(prompt, index) => (
+                    <button
+                      class="nav-item"
+                      classList={{ current: index() === currentPromptIndex() }}
+                      title={prompt.text}
+                      onClick={() => jumpToPrompt(index())}
+                    >
+                      {prompt.text || '（空消息）'}
+                    </button>
+                  )}
+                </For>
+              </div>
+            </div>
+          </Show>
+
+          <Show when={!atBottom()}>
+            <button class="to-bottom" title="回到最新" onClick={scrollToBottom}>
+              ↓
+            </button>
+          </Show>
+
           <div class="composer">
             <textarea
               value={input()}
@@ -622,14 +1032,35 @@ export default function App() {
               onInput={(event) => setInput(event.currentTarget.value)}
               onKeyDown={onComposerKeyDown}
             />
-            <button
-              class="send"
-              classList={{ stop: isRunning() }}
-              disabled={isRunning() ? interrupting() : sending() || !input().trim()}
-              onClick={() => (isRunning() ? void interrupt() : void send())}
-            >
-              {isRunning() ? (interrupting() ? '停止中…' : '停止') : sending() ? '发送中…' : '发送'}
-            </button>
+            <div class="composer-bar">
+              <button class="model-chip" disabled={!activeId()} onClick={() => setPickerOpen(true)}>
+                <span class="model-chip-name">{currentModel()?.name ?? '选择模型'}</span>
+                <svg class="model-chip-chev" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M7 10l5 5 5-5" />
+                </svg>
+              </button>
+              <button
+                class="send"
+                classList={{ stop: isRunning() }}
+                title={isRunning() ? '停止' : '发送'}
+                aria-label={isRunning() ? '停止' : '发送'}
+                disabled={isRunning() ? interrupting() : sending() || !input().trim()}
+                onClick={() => (isRunning() ? void interrupt() : void send())}
+              >
+                <Show
+                  when={isRunning()}
+                  fallback={
+                    <svg class="send-icon" viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="M12 19V5M6 11l6-6 6 6" />
+                    </svg>
+                  }
+                >
+                  <svg class="send-icon" viewBox="0 0 24 24" aria-hidden="true">
+                    <rect x="8" y="8" width="8" height="8" rx="1.5" />
+                  </svg>
+                </Show>
+              </button>
+            </div>
           </div>
         </Show>
       </main>
@@ -641,6 +1072,64 @@ export default function App() {
           onPick={(model) => void switchModel(model)}
           onClose={() => setPickerOpen(false)}
         />
+      </Show>
+
+      <Show when={archivedOpen()}>
+        <div class="overlay" onClick={() => setArchivedOpen(false)}>
+          <div class="dialog archived-dialog" onClick={(event) => event.stopPropagation()}>
+            <div class="dialog-title">已归档会话</div>
+            <Show
+              when={archivedSessions().length}
+              fallback={<div class="archived-empty">还没有已归档的会话</div>}
+            >
+              <div class="archived-list">
+                <For each={archivedSessions()}>
+                  {(session) => (
+                    <div class="archived-item">
+                      <span class="archived-title" title={session.title ?? ''}>
+                        {session.title || '未命名会话'}
+                      </span>
+                      <button class="ghost" onClick={() => void restoreSession(session.id)}>
+                        恢复
+                      </button>
+                      <button class="danger" onClick={() => void deleteSession(session.id)}>
+                        删除
+                      </button>
+                    </div>
+                  )}
+                </For>
+              </div>
+            </Show>
+            <div class="dialog-actions">
+              <button onClick={() => setArchivedOpen(false)}>关闭</button>
+            </div>
+          </div>
+        </div>
+      </Show>
+
+      <Show when={deletingWorkspace()}>
+        {(directory) => (
+          <div class="overlay" onClick={() => setDeletingWorkspace(null)}>
+            <div class="dialog" onClick={(event) => event.stopPropagation()}>
+              <div class="dialog-title">删除工作目录</div>
+              <div class="dialog-message">
+                确定删除「{pathName(directory())}」吗？该目录下的{' '}
+                {workspaceGroups().find(
+                  (group) => group.directory.toLowerCase() === directory().toLowerCase(),
+                )?.sessions.length ?? 0}{' '}
+                个会话会被归档，可以在「已归档」里恢复。
+              </div>
+              <div class="dialog-actions">
+                <button class="ghost" onClick={() => setDeletingWorkspace(null)}>
+                  取消
+                </button>
+                <button class="primary" onClick={() => void confirmDeleteWorkspace()}>
+                  删除并归档
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </Show>
 
       <Show when={activePermission()}>

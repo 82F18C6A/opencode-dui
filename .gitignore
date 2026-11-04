@@ -9,4 +9,4 @@ dist/
 .idea/
 v-err.txt
 v-out.txt
-tools/exports/
+tools/
