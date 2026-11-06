@@ -9,4 +9,9 @@ dist/
 .idea/
 v-err.txt
 v-out.txt
-tools/
+tools/exports/
+tools/*.png
+tools/待优化项.md
+AGENTS.md
+docs/*
+!docs/changelog.md

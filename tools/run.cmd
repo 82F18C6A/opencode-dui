@@ -1,5 +1,5 @@
 @echo off
-cd /d "%~dp0"
+cd /d "%~dp0..\demo"
 
 rem Clear the run-as-node flag that exists in this machine's environment
 set ELECTRON_RUN_AS_NODE=

@@ -1,5 +1,5 @@
 import { app, BrowserWindow, dialog, ipcMain, session, type OpenDialogOptions } from 'electron'
-import { appendFileSync, existsSync, mkdirSync } from 'node:fs'
+import { appendFileSync, cpSync, existsSync, mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { Service } from '@opencode/client/service'
 
@@ -7,8 +7,18 @@ import { Service } from '@opencode/client/service'
  * 阶段 1b：主进程发现/拉起服务，渲染层是自建的 SolidJS 界面
  */
 
-// 固定用户数据目录，避免打包后本地工作目录记录随 app 名变化而丢失
-app.setPath('userData', join(app.getPath('appData'), 'opencode-gui'))
+// 用户数据目录固定为 opencode-dui；首次启动时从旧的 opencode-gui 目录迁移一次
+const appDataDir = app.getPath('appData')
+const userDataDir = join(appDataDir, 'opencode-dui')
+const legacyUserDataDir = join(appDataDir, 'opencode-gui')
+if (!existsSync(userDataDir) && existsSync(legacyUserDataDir)) {
+  try {
+    cpSync(legacyUserDataDir, userDataDir, { recursive: true })
+  } catch {
+    // 迁移失败时仍用新目录，不影响启动
+  }
+}
+app.setPath('userData', userDataDir)
 
 // 主进程 stdout 在 Windows GUI 下不可见，日志落到文件
 let logFile = ''

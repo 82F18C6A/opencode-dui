@@ -1,5 +1,5 @@
 {
-  "name": "opencode-gui",
+  "name": "opencode-dui",
   "version": "0.0.2",
   "private": true,
   "description": "Custom Electron frontend for opencode",
