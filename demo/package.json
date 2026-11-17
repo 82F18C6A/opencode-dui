@@ -1,6 +1,6 @@
 {
   "name": "opencode-dui",
-  "version": "0.0.2",
+  "version": "0.1.0",
   "private": true,
   "description": "Custom Electron frontend for opencode",
   "main": "out/main/index.js",
@@ -19,7 +19,8 @@
     },
     "files": [
       "out/**/*",
-      "package.json"
+      "package.json",
+      "build/icon.png"
     ],
     "asar": true,
     "electronDist": "D:/Plugins/electron-45.0.0",
@@ -27,7 +28,7 @@
       "target": [
         "dir"
       ],
-      "signAndEditExecutable": false
+      "icon": "build/icon.ico"
     }
   },
   "devDependencies": {

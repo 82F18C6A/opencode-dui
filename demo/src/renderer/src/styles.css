@@ -92,6 +92,25 @@ button {
   margin-bottom: 8px;
 }
 
+.workspace.dragging {
+  opacity: 0.45;
+}
+
+.workspace.drop-target {
+  position: relative;
+}
+
+.workspace.drop-target::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -4px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--accent);
+}
+
 .workspace-head {
   display: flex;
   align-items: center;
@@ -373,6 +392,55 @@ button {
   margin-right: max(0px, calc((100% - 820px) / 2));
 }
 
+/* 用户消息行：气泡靠右，撤销按钮在左侧 */
+.msg-user-wrap {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.msg-user-wrap .msg-user {
+  margin: 0;
+  max-width: 76%;
+}
+
+.msg-revert {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--faint);
+  opacity: 0;
+  transition:
+    opacity 0.15s ease,
+    color 0.15s ease;
+}
+
+.msg-user-wrap:hover .msg-revert,
+.msg-revert:focus-visible {
+  opacity: 1;
+}
+
+.msg-revert:hover {
+  color: var(--accent);
+  border-color: var(--border-strong);
+}
+
+.msg-revert svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
 .msg-user {
   justify-self: end;
   max-width: 76%;
@@ -652,6 +720,39 @@ button {
   border-radius: 10px;
   padding: 12px 14px;
   overflow: auto;
+  position: relative;
+}
+
+/* 代码块复制按钮 */
+.answer pre.has-copy {
+  padding-right: 56px;
+}
+
+.code-copy {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--faint);
+  font-size: 11px;
+  line-height: 1;
+  padding: 4px 7px;
+  opacity: 0;
+  transition:
+    opacity 0.15s ease,
+    color 0.15s ease;
+}
+
+.answer pre:hover .code-copy,
+.code-copy:focus-visible {
+  opacity: 1;
+}
+
+.code-copy:hover {
+  color: var(--accent);
+  border-color: var(--border-strong);
 }
 
 .answer pre code {
@@ -699,6 +800,193 @@ button {
   margin: 16px 0;
 }
 
+/* ---------- 提问表单 ---------- */
+.form-composer {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px 12px;
+  border: 1px solid var(--accent);
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.92);
+  backdrop-filter: blur(12px);
+  box-shadow: 0 10px 30px rgba(76, 56, 140, 0.12);
+  max-width: 820px;
+  width: 100%;
+  margin: 0 auto 12px;
+}
+
+.form-composer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.form-composer-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.form-composer-close {
+  flex: none;
+  border: 0;
+  background: transparent;
+  color: var(--faint);
+  font-size: 18px;
+  line-height: 1;
+  padding: 2px 6px;
+}
+
+.form-composer-close:hover {
+  color: var(--text);
+}
+
+.form-composer-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-height: 40vh;
+  overflow-y: auto;
+}
+
+.form-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.form-field-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.form-field-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.form-required {
+  color: var(--error);
+}
+
+.form-field-desc {
+  font-size: 11.5px;
+  color: var(--faint);
+}
+
+.form-input {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--surface);
+  padding: 8px 10px;
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--text);
+  outline: none;
+}
+
+.form-input:focus {
+  border-color: var(--accent);
+}
+
+.form-custom {
+  margin-top: 6px;
+}
+
+.form-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.form-check input {
+  accent-color: var(--accent);
+}
+
+.form-options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.form-option {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color 0.12s,
+    background-color 0.12s;
+}
+
+.form-option:hover {
+  border-color: var(--border-strong);
+  background: var(--accent-soft);
+}
+
+.form-option.selected {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.form-option-label {
+  font-weight: 500;
+}
+
+.form-option-desc {
+  font-size: 11.5px;
+  color: var(--faint);
+}
+
+.form-link {
+  font-size: 12.5px;
+  color: var(--accent);
+  word-break: break-all;
+}
+
+.form-composer-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.form-composer-foot button {
+  border: 1px solid var(--border);
+  background: var(--surface);
+  border-radius: 9px;
+  padding: 7px 14px;
+  font-size: 12.5px;
+  color: var(--dim);
+}
+
+.form-composer-foot button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.form-composer-foot button.primary:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
 /* ---------- 输入区 ---------- */
 .composer {
   flex: none;
@@ -741,6 +1029,56 @@ button {
   justify-content: space-between;
   gap: 10px;
   min-height: 36px;
+}
+
+.composer-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.context-usage {
+  flex: none;
+  font-size: 11.5px;
+  color: var(--faint);
+  white-space: nowrap;
+}
+
+/* 输入区上方的错误提示 */
+.error-banner {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: min(820px, calc(100% - 48px));
+  margin: 0 auto 8px;
+  padding: 8px 12px;
+  border: 1px solid #f0c4c4;
+  border-radius: 10px;
+  background: #fdf2f2;
+  color: var(--error);
+  font-size: 12.5px;
+}
+
+.error-banner-text {
+  flex: 1;
+  min-width: 0;
+  word-break: break-word;
+}
+
+.error-banner-close {
+  flex: none;
+  border: 0;
+  background: transparent;
+  color: var(--error);
+  font-size: 12px;
+  padding: 2px 4px;
+  opacity: 0.75;
+}
+
+.error-banner-close:hover {
+  opacity: 1;
 }
 
 .model-chip {
@@ -1073,6 +1411,17 @@ button {
   background: var(--accent);
   border-color: var(--accent);
   color: #fff;
+}
+
+.dialog-actions button.danger {
+  background: var(--error);
+  border-color: var(--error);
+  color: #fff;
+}
+
+.dialog-actions button.danger:disabled {
+  opacity: 0.6;
+  cursor: default;
 }
 
 .dialog-actions button.ghost {

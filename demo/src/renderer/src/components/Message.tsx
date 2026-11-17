@@ -1,4 +1,4 @@
-import { For, Show, createSignal, createMemo } from 'solid-js'
+import { For, Show, createEffect, createSignal, createMemo } from 'solid-js'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import { toBlocks, splitBlocks, type Block } from '../lib/blocks'
@@ -119,14 +119,32 @@ function ToolCard(props: { name: string; state: unknown; time?: unknown }) {
 }
 
 /** 一条消息 */
-export default function Message(props: { msg: any; index: number }) {
+export default function Message(props: {
+  msg: any
+  index: number
+  canRevert?: boolean
+  onRevert?: (id: string) => void
+}) {
   const msg = () => props.msg
 
   return (
     <Show when={msg().type === 'user'} fallback={<AssistantMessage msg={msg()} />}>
-      <div class="msg-user">
-        <span class="who">你</span>
-        {msg().text}
+      <div class="msg-user-wrap">
+        <Show when={props.canRevert && props.onRevert}>
+          <button
+            class="msg-revert"
+            title="撤销这条消息"
+            onClick={() => props.onRevert?.(msg().id)}
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M9 14L4 9l5-5M4 9h9a6 6 0 0 1 0 12h-3" />
+            </svg>
+          </button>
+        </Show>
+        <div class="msg-user">
+          <span class="who">你</span>
+          {msg().text}
+        </div>
       </div>
     </Show>
   )
@@ -136,6 +154,44 @@ function AssistantMessage(props: { msg: any }) {
   const blocks = createMemo(() => toBlocks(props.msg?.content))
   const split = createMemo(() => splitBlocks(blocks()))
   const answerHtml = createMemo(() => (split().answer ? renderMarkdown(split().answer) : ''))
+
+  let answerRef: HTMLDivElement | undefined
+
+  // 渲染后给每个代码块加复制按钮
+  createEffect(() => {
+    answerHtml()
+    const root = answerRef
+    if (!root) return
+
+    for (const pre of Array.from(root.querySelectorAll('pre'))) {
+      if (pre.querySelector('.code-copy')) continue
+      pre.classList.add('has-copy')
+
+      const button = document.createElement('button')
+      button.type = 'button'
+      button.className = 'code-copy'
+      button.textContent = '复制'
+      button.addEventListener('click', () => {
+        const text = pre.querySelector('code')?.textContent ?? pre.textContent ?? ''
+        navigator.clipboard
+          .writeText(text)
+          .then(() => {
+            button.textContent = '已复制'
+            setTimeout(() => {
+              button.textContent = '复制'
+            }, 1500)
+          })
+          .catch(() => {
+            button.textContent = '复制失败'
+            setTimeout(() => {
+              button.textContent = '复制'
+            }, 1500)
+          })
+      })
+
+      pre.appendChild(button)
+    }
+  })
 
   return (
     <Show when={blocks().length > 0}>
@@ -149,7 +205,7 @@ function AssistantMessage(props: { msg: any }) {
         </For>
         <Show when={split().answer}>
           <div class="answer-bubble">
-            <div class="answer" innerHTML={answerHtml()} />
+            <div class="answer" ref={answerRef} innerHTML={answerHtml()} />
           </div>
         </Show>
       </div>

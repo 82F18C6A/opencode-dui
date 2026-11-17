@@ -2,6 +2,7 @@ import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount }
 import { OpenCode } from '@opencode/client'
 import Message from './components/Message'
 import ModelPicker from './components/ModelPicker'
+import FormComposer, { type FormInfo } from './components/FormComposer'
 
 type Session = {
   id: string
@@ -18,6 +19,7 @@ type Model = {
   name?: string
   status?: string
   enabled?: boolean
+  limit?: { context?: number }
 }
 
 type PermissionRequest = {
@@ -82,6 +84,30 @@ function saveRemoved(list: string[]) {
   }
 }
 
+const ORDER_KEY = 'opencode.workspaceOrder'
+
+/** 读取工作目录的手动顺序 */
+function loadOrder(): string[] {
+  try {
+    const raw = localStorage.getItem(ORDER_KEY)
+    const parsed = raw ? JSON.parse(raw) : []
+    return Array.isArray(parsed)
+      ? parsed.filter((item): item is string => typeof item === 'string')
+      : []
+  } catch {
+    return []
+  }
+}
+
+/** 写回工作目录的手动顺序 */
+function saveOrder(list: string[]) {
+  try {
+    localStorage.setItem(ORDER_KEY, JSON.stringify(list))
+  } catch {
+    // 写不进去时忽略
+  }
+}
+
 /** 取路径最后一段作为显示名 */
 function pathName(directory: string): string {
   if (!directory) return '未指定目录'
@@ -112,6 +138,10 @@ export default function App() {
   const [currentPromptIndex, setCurrentPromptIndex] = createSignal(0)
   // 本地登记的工作目录，服务端项目与会话目录会合并进来
   const [localWorkspaces, setLocalWorkspaces] = createSignal<string[]>(loadWorkspaces())
+  // 手动拖拽后的目录顺序
+  const [workspaceOrder, setWorkspaceOrder] = createSignal<string[]>(loadOrder())
+  const [draggingWorkspace, setDraggingWorkspace] = createSignal<string | null>(null)
+  const [dropTargetWorkspace, setDropTargetWorkspace] = createSignal<string | null>(null)
   const [projects, setProjects] = createSignal<string[]>([])
   // 折叠的工作目录，key 为小写路径
   const [collapsed, setCollapsed] = createSignal<Record<string, true>>({})
@@ -124,12 +154,31 @@ export default function App() {
   // 就地重命名
   const [renamingId, setRenamingId] = createSignal<string | null>(null)
   const [renameText, setRenameText] = createSignal('')
+  // 输入区上方的错误提示
+  const [errorBanner, setErrorBanner] = createSignal<string | null>(null)
+  // 服务重试提示
+  const [retryNotice, setRetryNotice] = createSignal<{
+    message: string
+    attempt: number
+    at: number
+  } | null>(null)
+  const [retryTick, setRetryTick] = createSignal(0)
+  // agent 提问
+  const [forms, setForms] = createSignal<FormInfo[]>([])
+  const [submittingForm, setSubmittingForm] = createSignal(false)
+  // 归档全部删除
+  const [confirmDeleteAll, setConfirmDeleteAll] = createSignal(false)
+  const [deletingAll, setDeletingAll] = createSignal(false)
+  // 撤销消息
+  const [revertTarget, setRevertTarget] = createSignal<string | null>(null)
 
   let client: any = null
   let scroller: HTMLDivElement | undefined
   let navPanel: HTMLDivElement | undefined
   let reloadTimer: ReturnType<typeof setTimeout> | undefined
   let pollTimer: ReturnType<typeof setInterval> | undefined
+  let errorTimer: ReturnType<typeof setTimeout> | undefined
+  let retryTimer: ReturnType<typeof setInterval> | undefined
 
   const activeSession = createMemo(() => sessions().find((s) => s.id === activeId()))
   const activePermission = createMemo(() => permissions()[0])
@@ -150,6 +199,18 @@ export default function App() {
         text: String(message?.text ?? '').replace(/\s+/g, ' ').trim(),
       })),
   )
+
+  // 最后一条用户消息，只有它能撤销
+  const lastUserMessage = createMemo(() => {
+    const list = messages()
+    for (let i = list.length - 1; i >= 0; i--) {
+      if (list[i]?.type === 'user') return list[i]
+    }
+    return undefined
+  })
+
+  // 当前待回答的提问
+  const activeForm = createMemo(() => forms()[0])
 
   // 工作目录 → 会话的两级分组
   const workspaceGroups = createMemo<WorkspaceGroup[]>(() => {
@@ -185,8 +246,17 @@ export default function App() {
     for (const group of list) {
       group.sessions.sort((a, b) => (b.time?.updated ?? 0) - (a.time?.updated ?? 0))
     }
-    // 有会话的目录按最近使用排前，其余保持登记顺序
+
+    // 有手动顺序的按手动顺序，其余按最近使用排前
+    const order = new Map(workspaceOrder().map((key, index) => [key, index]))
     list.sort((a, b) => {
+      if (a.orphan) return 1
+      if (b.orphan) return -1
+      const oa = order.get(a.directory.toLowerCase())
+      const ob = order.get(b.directory.toLowerCase())
+      if (oa !== undefined || ob !== undefined) {
+        return (oa ?? Number.MAX_SAFE_INTEGER) - (ob ?? Number.MAX_SAFE_INTEGER)
+      }
       const at = a.sessions[0]?.time?.updated ?? 0
       const bt = b.sessions[0]?.time?.updated ?? 0
       return bt - at
@@ -206,6 +276,31 @@ export default function App() {
         name: ref.id,
       }
     )
+  })
+
+  /** 把 token 数格式化成 k */
+  function formatTokens(value: number): string {
+    if (value >= 1000) return `${(value / 1000).toFixed(1)}k`
+    return String(value)
+  }
+
+  // 当前上下文占用：最近一条 assistant 的 input + cache.read
+  const contextUsage = createMemo(() => {
+    const list = messages()
+    for (let i = list.length - 1; i >= 0; i--) {
+      const message = list[i]
+      if (message?.type !== 'assistant' || !message.tokens) continue
+      const used = (message.tokens.input ?? 0) + (message.tokens.cache?.read ?? 0)
+      const limit = currentModel()?.limit?.context ?? 0
+      return { used, limit }
+    }
+    return null
+  })
+
+  const usageText = createMemo(() => {
+    const usage = contextUsage()
+    if (!usage || !usage.used) return ''
+    return `${formatTokens(usage.used)}${usage.limit ? ` / ${formatTokens(usage.limit)}` : ''}`
   })
 
   async function refreshMessages(resetCursor = false) {
@@ -300,6 +395,32 @@ export default function App() {
     }
   }
 
+  /** 拉取当前会话待回答的提问 */
+  async function refreshForms() {
+    if (!client) return
+    const id = activeId()
+    if (!id) {
+      setForms([])
+      return
+    }
+    try {
+      const res: any = await client.session.form.list({ sessionID: id })
+      const next: FormInfo[] = res?.data ?? res ?? []
+      // 表单列表没变化时保留原引用，避免打断正在填写的表单
+      setForms((prev) => {
+        if (
+          prev.length === next.length &&
+          prev.every((form, index) => form.id === next[index]?.id)
+        ) {
+          return prev
+        }
+        return next
+      })
+    } catch {
+      setForms([])
+    }
+  }
+
   /** 展开某个工作目录 */
   function expandWorkspace(directory: string) {
     const key = directory.toLowerCase()
@@ -320,6 +441,80 @@ export default function App() {
       else next[key] = true
       return next
     })
+  }
+
+  /** 开始拖动工作目录 */
+  function onWorkspaceDragStart(directory: string, event: DragEvent) {
+    setDraggingWorkspace(directory.toLowerCase())
+    if (event.dataTransfer) {
+      event.dataTransfer.effectAllowed = 'move'
+      event.dataTransfer.setData('text/plain', directory)
+    }
+  }
+
+  /** 拖动经过其他目录 */
+  function onWorkspaceDragOver(directory: string, event: DragEvent) {
+    if (!draggingWorkspace()) return
+    event.preventDefault()
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
+    if (directory.toLowerCase() !== draggingWorkspace()) {
+      setDropTargetWorkspace(directory.toLowerCase())
+    }
+  }
+
+  /** 放下时重排顺序 */
+  function onWorkspaceDrop(directory: string, event: DragEvent) {
+    event.preventDefault()
+    const from = draggingWorkspace()
+    if (from) reorderWorkspace(from, directory.toLowerCase())
+    setDraggingWorkspace(null)
+    setDropTargetWorkspace(null)
+  }
+
+  function onWorkspaceDragEnd() {
+    setDraggingWorkspace(null)
+    setDropTargetWorkspace(null)
+  }
+
+  /** 把 from 目录移动到 to 目录的位置 */
+  function reorderWorkspace(from: string, to: string) {
+    if (from === to) return
+    const keys = workspaceGroups()
+      .filter((group) => !group.orphan)
+      .map((group) => group.directory.toLowerCase())
+    const next = keys.filter((key) => key !== from)
+    const index = next.indexOf(to)
+    if (index === -1) return
+    next.splice(index, 0, from)
+    setWorkspaceOrder(next)
+    saveOrder(next)
+  }
+
+  /** 把目录移到最前 */
+  function moveWorkspaceToTop(from: string) {
+    const keys = workspaceGroups()
+      .filter((group) => !group.orphan)
+      .map((group) => group.directory.toLowerCase())
+    const next = [from, ...keys.filter((key) => key !== from)]
+    setWorkspaceOrder(next)
+    saveOrder(next)
+  }
+
+  /** 拖到列表空白处 */
+  function onListDragOver(event: DragEvent) {
+    if (!draggingWorkspace()) return
+    event.preventDefault()
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
+    const target = event.target as HTMLElement | null
+    if (!target?.closest?.('.workspace')) setDropTargetWorkspace(null)
+  }
+
+  function onListDrop(event: DragEvent) {
+    if (!draggingWorkspace()) return
+    event.preventDefault()
+    if (!dropTargetWorkspace()) moveWorkspaceToTop(draggingWorkspace()!)
+    setDraggingWorkspace(null)
+    setDropTargetWorkspace(null)
   }
 
   /** 登记一个工作目录，不创建会话 */
@@ -367,16 +562,21 @@ export default function App() {
     if (type === 'session.status') {
       const status = data.status?.type
       if (status === 'busy' || status === 'retry') setSessionRunning(sessionID, true)
-      else if (status === 'idle') setSessionRunning(sessionID, false)
+      else if (status === 'idle') {
+        clearRetry()
+        setSessionRunning(sessionID, false)
+      }
       return true
     }
 
     if (type === 'session.idle') {
+      clearRetry()
       setSessionRunning(sessionID, false)
       return true
     }
 
     if (type === 'session.execution.started') {
+      clearRetry()
       setSessionRunning(sessionID, true)
       return true
     }
@@ -387,6 +587,7 @@ export default function App() {
       type === 'session.execution.failed' ||
       type === 'session.execution.interrupted'
     ) {
+      clearRetry()
       setSessionRunning(sessionID, false)
       return true
     }
@@ -420,6 +621,7 @@ export default function App() {
     const directory = sessions().find((session) => session.id === id)?.location?.directory
     if (directory) expandWorkspace(directory)
     await refreshMessages(true)
+    await refreshForms()
   }
 
   function scheduleReload() {
@@ -427,8 +629,48 @@ export default function App() {
     reloadTimer = setTimeout(() => {
       void refreshMessages()
       void refreshPermissions()
+      void refreshForms()
     }, 350)
   }
+
+  /** 从各种错误形态里取文案 */
+  function errorMessage(error: unknown): string {
+    if (!error) return ''
+    const any = error as any
+    return String(any?.message ?? any?.data?.message ?? any?.error?.message ?? any)
+  }
+
+  /** 显示错误提示；额度/限流常驻，其余 5 秒后消失 */
+  function showError(error: unknown) {
+    const message = errorMessage(error).trim()
+    if (!message) return
+    setErrorBanner(message)
+    clearTimeout(errorTimer)
+    if (!/free|quota|limit|rate|额度|限制|重试/i.test(message)) {
+      errorTimer = setTimeout(() => setErrorBanner(null), 5000)
+    }
+  }
+
+  /** 启动重试倒计时 */
+  function startRetryTimer() {
+    clearInterval(retryTimer)
+    retryTimer = setInterval(() => setRetryTick((value) => value + 1), 1000)
+  }
+
+  /** 清除重试提示 */
+  function clearRetry() {
+    clearInterval(retryTimer)
+    retryTimer = undefined
+    setRetryNotice(null)
+  }
+
+  const retryText = createMemo(() => {
+    retryTick()
+    const notice = retryNotice()
+    if (!notice) return ''
+    const seconds = Math.max(0, Math.ceil((notice.at - Date.now()) / 1000))
+    return `${notice.message}（第 ${notice.attempt} 次重试，${seconds} 秒后）`
+  })
 
   onMount(async () => {
     try {
@@ -455,9 +697,13 @@ export default function App() {
       if (res.data?.[0]) await openSession(res.data[0].id)
       await refreshActiveSessions()
       await refreshPermissions()
+      await refreshForms()
       setPhase('ready')
       void subscribe()
-      pollTimer = setInterval(() => void refreshPermissions(), 2500)
+      pollTimer = setInterval(() => {
+        void refreshPermissions()
+        void refreshForms()
+      }, 2500)
     } catch (error) {
       setErrorText(error instanceof Error ? error.message : String(error))
       setPhase('error')
@@ -466,6 +712,7 @@ export default function App() {
 
   onCleanup(() => {
     clearInterval(pollTimer)
+    clearInterval(retryTimer)
     clearTimeout(reloadTimer)
   })
 
@@ -477,12 +724,22 @@ export default function App() {
 
         // 运行状态在过滤前处理，后台会话结束也要更新
         if (handleRunningEvent(type, data)) {
+          if (type === 'session.execution.failed' && data?.error) showError(data.error)
           if (data?.sessionID === activeId()) scheduleReload()
           continue
         }
 
         // 只处理当前会话
         if (data?.sessionID && data.sessionID !== activeId()) continue
+
+        // 服务端重试：显示次数和倒计时
+        if (type === 'session.retry.scheduled' && data) {
+          const message = errorMessage(data.error) || '请求失败，正在重试'
+          setRetryNotice({ message, attempt: data.attempt ?? 0, at: data.at ?? 0 })
+          startRetryTimer()
+          scheduleReload()
+          continue
+        }
 
         // 文本与推理走增量，其余事件触发一次重拉校准
         if (type === 'session.text.delta' && data) {
@@ -615,6 +872,80 @@ export default function App() {
       await refreshSessions()
     } catch (error) {
       setErrorText(error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  /** 删除全部已归档会话 */
+  async function deleteAllArchived() {
+    if (!client || deletingAll()) return
+    setDeletingAll(true)
+    try {
+      for (const session of archivedSessions()) {
+        await client.session.remove({ sessionID: session.id })
+      }
+      setConfirmDeleteAll(false)
+      await openArchived()
+      await refreshSessions()
+    } catch (error) {
+      showError(error)
+    } finally {
+      setDeletingAll(false)
+    }
+  }
+
+  /** 请求撤销一条用户消息 */
+  function requestRevert(id: string) {
+    setRevertTarget(id)
+  }
+
+  /** 确认撤销：回退服务端上下文，并把原文填回输入框 */
+  async function confirmRevert() {
+    const id = revertTarget()
+    const sessionID = activeId()
+    if (!id || !sessionID || !client) return
+    const target = messages().find((message) => message?.id === id)
+    setRevertTarget(null)
+    try {
+      // files: false 跳过文件快照，避免会话目录的 Git 快照损坏导致 500
+      await client.session.revert.stage({ sessionID, messageID: id, files: false })
+      await client.session.revert.commit({ sessionID })
+      // 服务端会删掉这条及之后的消息，本地先清空，避免保留缓存的回答
+      setMessages([])
+      setOlderCursor(null)
+      if (target?.text) setInput(String(target.text))
+      await refreshMessages(true)
+    } catch (error) {
+      showError(error)
+    }
+  }
+
+  /** 提交提问回答 */
+  async function replyForm(
+    form: FormInfo,
+    answer: Record<string, string | number | boolean | string[]>,
+  ) {
+    const sessionID = activeId()
+    if (!client || !sessionID) return
+    setSubmittingForm(true)
+    try {
+      await client.session.form.reply({ sessionID, formID: form.id, answer })
+      await refreshForms()
+    } catch (error) {
+      showError(error)
+    } finally {
+      setSubmittingForm(false)
+    }
+  }
+
+  /** 取消提问 */
+  async function cancelForm(form: FormInfo) {
+    const sessionID = activeId()
+    if (!client || !sessionID) return
+    try {
+      await client.session.form.cancel({ sessionID, formID: form.id })
+      await refreshForms()
+    } catch (error) {
+      showError(error)
     }
   }
 
@@ -791,10 +1122,11 @@ export default function App() {
       await client.session.prompt({ sessionID: id, text })
       // prompt 只是入队，先乐观置忙，后续事件再校准
       setSessionRunning(id, true)
+      setErrorBanner(null)
       await refreshMessages()
     } catch (error) {
       setSessionRunning(id, false)
-      setErrorText(error instanceof Error ? error.message : String(error))
+      showError(error)
       setInput(text)
     } finally {
       setSending(false)
@@ -862,12 +1194,26 @@ export default function App() {
         <button class="new-workspace" onClick={() => void addWorkspace()}>
           + 新建工作目录
         </button>
-        <div class="session-list">
+        <div class="session-list" onDragOver={onListDragOver} onDrop={onListDrop}>
           <For each={workspaceGroups()}>
             {(group) => {
               const open = () => !collapsed()[group.directory.toLowerCase()]
               return (
-                <div class="workspace">
+                <div
+                  class="workspace"
+                  classList={{
+                    dragging: draggingWorkspace() === group.directory.toLowerCase(),
+                    'drop-target': dropTargetWorkspace() === group.directory.toLowerCase(),
+                  }}
+                  draggable={!group.orphan}
+                  onDragStart={(event) => onWorkspaceDragStart(group.directory, event)}
+                  onDragOver={(event) => onWorkspaceDragOver(group.directory, event)}
+                  onDrop={(event) => {
+                    event.stopPropagation()
+                    onWorkspaceDrop(group.directory, event)
+                  }}
+                  onDragEnd={onWorkspaceDragEnd}
+                >
                   <div class="workspace-head" classList={{ orphan: group.orphan }}>
                     <button
                       class="workspace-toggle"
@@ -987,7 +1333,16 @@ export default function App() {
 
         <Show when={phase() === 'ready'}>
           <div class="messages" ref={scroller} onScroll={onMessagesScroll}>
-            <For each={messages()}>{(msg, index) => <Message msg={msg} index={index()} />}</For>
+            <For each={messages()}>
+              {(msg, index) => (
+                <Message
+                  msg={msg}
+                  index={index()}
+                  canRevert={msg?.type === 'user' && msg?.id === lastUserMessage()?.id}
+                  onRevert={requestRevert}
+                />
+              )}
+            </For>
             <Show when={interruptNotice()}>
               <div class="interrupted-note">{interruptNotice()}</div>
             </Show>
@@ -1025,43 +1380,78 @@ export default function App() {
             </button>
           </Show>
 
-          <div class="composer">
-            <textarea
-              value={input()}
-              placeholder="发消息…（Enter 发送，Shift+Enter 换行）"
-              onInput={(event) => setInput(event.currentTarget.value)}
-              onKeyDown={onComposerKeyDown}
-            />
-            <div class="composer-bar">
-              <button class="model-chip" disabled={!activeId()} onClick={() => setPickerOpen(true)}>
-                <span class="model-chip-name">{currentModel()?.name ?? '选择模型'}</span>
-                <svg class="model-chip-chev" viewBox="0 0 24 24" aria-hidden="true">
-                  <path d="M7 10l5 5 5-5" />
-                </svg>
-              </button>
+          <Show when={retryText() || errorBanner()}>
+            <div class="error-banner">
+              <span class="error-banner-text">{retryText() || errorBanner()}</span>
               <button
-                class="send"
-                classList={{ stop: isRunning() }}
-                title={isRunning() ? '停止' : '发送'}
-                aria-label={isRunning() ? '停止' : '发送'}
-                disabled={isRunning() ? interrupting() : sending() || !input().trim()}
-                onClick={() => (isRunning() ? void interrupt() : void send())}
+                class="error-banner-close"
+                onClick={() => {
+                  clearRetry()
+                  setErrorBanner(null)
+                }}
               >
-                <Show
-                  when={isRunning()}
-                  fallback={
-                    <svg class="send-icon" viewBox="0 0 24 24" aria-hidden="true">
-                      <path d="M12 19V5M6 11l6-6 6 6" />
-                    </svg>
-                  }
-                >
-                  <svg class="send-icon" viewBox="0 0 24 24" aria-hidden="true">
-                    <rect x="8" y="8" width="8" height="8" rx="1.5" />
-                  </svg>
-                </Show>
+                关闭
               </button>
             </div>
-          </div>
+          </Show>
+
+          <Show when={activeForm()}>
+            {(form) => (
+              <FormComposer
+                form={form()}
+                submitting={submittingForm()}
+                onSubmit={(answer) => void replyForm(form(), answer)}
+                onCancel={() => void cancelForm(form())}
+              />
+            )}
+          </Show>
+
+          <Show when={!activeForm()}>
+            <div class="composer">
+              <textarea
+                value={input()}
+                placeholder="发消息…（Enter 发送，Shift+Enter 换行）"
+                onInput={(event) => setInput(event.currentTarget.value)}
+                onKeyDown={onComposerKeyDown}
+              />
+              <div class="composer-bar">
+                <div class="composer-info">
+                  <button class="model-chip" disabled={!activeId()} onClick={() => setPickerOpen(true)}>
+                    <span class="model-chip-name">{currentModel()?.name ?? '选择模型'}</span>
+                    <svg class="model-chip-chev" viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="M7 10l5 5 5-5" />
+                    </svg>
+                  </button>
+                  <Show when={usageText()}>
+                    <span class="context-usage" title="当前上下文占用 / 模型上限">
+                      {usageText()}
+                    </span>
+                  </Show>
+                </div>
+                <button
+                  class="send"
+                  classList={{ stop: isRunning() }}
+                  title={isRunning() ? '停止' : '发送'}
+                  aria-label={isRunning() ? '停止' : '发送'}
+                  disabled={isRunning() ? interrupting() : sending() || !input().trim()}
+                  onClick={() => (isRunning() ? void interrupt() : void send())}
+                >
+                  <Show
+                    when={isRunning()}
+                    fallback={
+                      <svg class="send-icon" viewBox="0 0 24 24" aria-hidden="true">
+                        <path d="M12 19V5M6 11l6-6 6 6" />
+                      </svg>
+                    }
+                  >
+                    <svg class="send-icon" viewBox="0 0 24 24" aria-hidden="true">
+                      <rect x="8" y="8" width="8" height="8" rx="1.5" />
+                    </svg>
+                  </Show>
+                </button>
+              </div>
+            </div>
+          </Show>
         </Show>
       </main>
 
@@ -1101,7 +1491,33 @@ export default function App() {
               </div>
             </Show>
             <div class="dialog-actions">
+              <Show when={archivedSessions().length}>
+                <button
+                  class="danger"
+                  disabled={deletingAll()}
+                  onClick={() => setConfirmDeleteAll(true)}
+                >
+                  全部删除
+                </button>
+              </Show>
               <button onClick={() => setArchivedOpen(false)}>关闭</button>
+            </div>
+          </div>
+        </div>
+      </Show>
+
+      <Show when={confirmDeleteAll()}>
+        <div class="overlay" onClick={() => setConfirmDeleteAll(false)}>
+          <div class="dialog" onClick={(event) => event.stopPropagation()}>
+            <div class="dialog-title">删除全部归档</div>
+            <div class="dialog-message">
+              将永久删除 {archivedSessions().length} 个已归档会话，无法恢复。
+            </div>
+            <div class="dialog-actions">
+              <button class="ghost" onClick={() => setConfirmDeleteAll(false)}>取消</button>
+              <button class="danger" disabled={deletingAll()} onClick={() => void deleteAllArchived()}>
+                {deletingAll() ? '删除中…' : '删除全部'}
+              </button>
             </div>
           </div>
         </div>
@@ -1130,6 +1546,25 @@ export default function App() {
             </div>
           </div>
         )}
+      </Show>
+
+      <Show when={revertTarget()}>
+        <div class="overlay" onClick={() => setRevertTarget(null)}>
+          <div class="dialog" onClick={(event) => event.stopPropagation()}>
+            <div class="dialog-title">撤销这条消息</div>
+            <div class="dialog-message">
+              这条消息之后的内容会被删除，原文会填回输入框，方便修改后重新发送。
+            </div>
+            <div class="dialog-actions">
+              <button class="ghost" onClick={() => setRevertTarget(null)}>
+                取消
+              </button>
+              <button class="danger" onClick={() => void confirmRevert()}>
+                撤销
+              </button>
+            </div>
+          </div>
+        </div>
       </Show>
 
       <Show when={activePermission()}>
