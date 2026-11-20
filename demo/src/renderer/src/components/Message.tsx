@@ -14,17 +14,26 @@ function renderMarkdown(text: string): string {
   })
 }
 
+// 记住推理块的展开状态，流式刷新重建组件时不收回
+const reasoningOpen = new Map<string, boolean>()
+
 /** 推理块：默认折叠成一行，展开后是淡化的小字 */
-function ReasoningBlock(props: { text: string; ms?: number }) {
-  const [open, setOpen] = createSignal(false)
+function ReasoningBlock(props: { text: string; ms?: number; stateKey: string }) {
+  const [open, setOpen] = createSignal(reasoningOpen.get(props.stateKey) ?? false)
   const seconds = createMemo(() => {
     if (props.ms === undefined) return null
     return Math.max(1, Math.round(props.ms / 1000))
   })
 
+  function toggle() {
+    const next = !open()
+    setOpen(next)
+    reasoningOpen.set(props.stateKey, next)
+  }
+
   return (
     <div class="reasoning" data-open={open()}>
-      <button class="reasoning-head" onClick={() => setOpen(!open())}>
+      <button class="reasoning-head" onClick={toggle}>
         <span class="chev">▶</span>
         <span>{seconds() ? `思考了 ${seconds()} 秒` : '思考过程'}</span>
       </button>
@@ -78,10 +87,10 @@ function firstLine(text: string): string {
   return line?.trim().slice(0, 80) ?? ''
 }
 
-/** 工具调用卡片：默认折叠成一行，失败时默认展开 */
+/** 工具调用卡片：默认折叠成一行 */
 function ToolCard(props: { name: string; state: unknown; time?: unknown }) {
   const status = () => toolStatus(props.state)
-  const [open, setOpen] = createSignal(status() === 'error')
+  const [open, setOpen] = createSignal(false)
 
   const input = () => toolInput(props.state)
   const output = () => toolOutput(props.state)
@@ -124,11 +133,22 @@ export default function Message(props: {
   index: number
   canRevert?: boolean
   onRevert?: (id: string) => void
+  final?: boolean
+  process?: Block[]
+  images?: string[]
+  onPreviewImage?: (url: string) => void
 }) {
   const msg = () => props.msg
 
   return (
-    <Show when={msg().type === 'user'} fallback={<AssistantMessage msg={msg()} />}>
+    <Show
+      when={msg().type === 'user'}
+      fallback={
+        props.final ? (
+          <AssistantMessage msg={msg()} final process={props.process} />
+        ) : null
+      }
+    >
       <div class="msg-user-wrap">
         <Show when={props.canRevert && props.onRevert}>
           <button
@@ -143,6 +163,20 @@ export default function Message(props: {
         </Show>
         <div class="msg-user">
           <span class="who">你</span>
+          <Show when={props.images?.length}>
+            <div class="msg-images">
+              <For each={props.images}>
+                {(url) => (
+                  <img
+                    src={url}
+                    alt="图片"
+                    onClick={() => props.onPreviewImage?.(url)}
+                    onError={(event) => event.currentTarget.remove()}
+                  />
+                )}
+              </For>
+            </div>
+          </Show>
           {msg().text}
         </div>
       </div>
@@ -150,10 +184,34 @@ export default function Message(props: {
   )
 }
 
-function AssistantMessage(props: { msg: any }) {
+/** 判断代码块是不是 HTML，决定要不要显示预览按钮 */
+function looksLikeHtml(code: string, pre: HTMLElement): boolean {
+  if (/^\s*<!doctype html/i.test(code) || /^\s*<html[\s>]/i.test(code)) return true
+  return Boolean(pre.querySelector('code.language-html'))
+}
+
+function AssistantMessage(props: {
+  msg: any
+  final?: boolean
+  process?: Block[]
+}) {
   const blocks = createMemo(() => toBlocks(props.msg?.content))
   const split = createMemo(() => splitBlocks(blocks()))
   const answerHtml = createMemo(() => (split().answer ? renderMarkdown(split().answer) : ''))
+  const processBlocks = createMemo(() => props.process ?? split().process)
+  const completed = createMemo(() => typeof props.msg?.time?.completed === 'number')
+  const duration = createMemo(() => {
+    const created = props.msg?.time?.created
+    const completedAt = props.msg?.time?.completed
+    if (typeof created !== 'number' || typeof completedAt !== 'number') return null
+    return Math.max(1, Math.round((completedAt - created) / 1000))
+  })
+  const [processOpen, setProcessOpen] = createSignal(!completed())
+
+  createEffect(() => {
+    // 回答输出完后自动折叠中间步骤
+    if (completed()) setProcessOpen(false)
+  })
 
   let answerRef: HTMLDivElement | undefined
 
@@ -164,48 +222,95 @@ function AssistantMessage(props: { msg: any }) {
     if (!root) return
 
     for (const pre of Array.from(root.querySelectorAll('pre'))) {
-      if (pre.querySelector('.code-copy')) continue
-      pre.classList.add('has-copy')
+      const codeText = pre.querySelector('code')?.textContent ?? pre.textContent ?? ''
 
-      const button = document.createElement('button')
-      button.type = 'button'
-      button.className = 'code-copy'
-      button.textContent = '复制'
-      button.addEventListener('click', () => {
-        const text = pre.querySelector('code')?.textContent ?? pre.textContent ?? ''
-        navigator.clipboard
-          .writeText(text)
-          .then(() => {
-            button.textContent = '已复制'
-            setTimeout(() => {
-              button.textContent = '复制'
-            }, 1500)
-          })
-          .catch(() => {
-            button.textContent = '复制失败'
-            setTimeout(() => {
-              button.textContent = '复制'
-            }, 1500)
-          })
-      })
+      if (!pre.querySelector('.code-copy')) {
+        pre.classList.add('has-copy')
 
-      pre.appendChild(button)
+        const button = document.createElement('button')
+        button.type = 'button'
+        button.className = 'code-copy'
+        button.textContent = '复制'
+        button.addEventListener('click', () => {
+          navigator.clipboard
+            .writeText(codeText)
+            .then(() => {
+              button.textContent = '已复制'
+              setTimeout(() => {
+                button.textContent = '复制'
+              }, 1500)
+            })
+            .catch(() => {
+              button.textContent = '复制失败'
+              setTimeout(() => {
+                button.textContent = '复制'
+              }, 1500)
+            })
+        })
+
+        pre.appendChild(button)
+      }
+
+      if (!pre.querySelector('.code-preview') && looksLikeHtml(codeText, pre)) {
+        const preview = document.createElement('button')
+        preview.type = 'button'
+        preview.className = 'code-preview'
+        preview.textContent = '预览'
+        preview.addEventListener('click', () => void window.opencode.previewHtml(codeText))
+        pre.appendChild(preview)
+      }
     }
   })
+
+  function onAnswerClick(event: MouseEvent) {
+    const target = (event.target as HTMLElement | null)?.closest('a')
+    if (!target) return
+    const href = target.getAttribute('href')
+    if (!href) return
+    event.preventDefault()
+    if (/^https?:\/\//i.test(href)) {
+      void window.opencode.openExternal(href)
+    } else if (href.startsWith('file://')) {
+      void window.opencode.openPath(decodeURIComponent(href.slice(7)))
+    }
+  }
 
   return (
     <Show when={blocks().length > 0}>
       <div class="msg-assistant">
-        <For each={split().process}>
-          {(block: Block) => {
-            if (block.kind === 'reasoning') return <ReasoningBlock text={block.text} ms={block.ms} />
-            if (block.kind === 'tool') return <ToolCard name={block.name} state={block.state} time={block.time} />
-            return null
-          }}
-        </For>
+        <Show when={processBlocks().length > 0}>
+          <div class="process" data-open={processOpen()}>
+            <button class="process-head" onClick={() => setProcessOpen(!processOpen())}>
+              <span class="process-dot" classList={{ done: completed() }} />
+              <span>{completed() && props.final ? `已完成${duration() !== null ? `，用时 ${duration()} 秒` : ''}` : completed() ? '中间过程' : '执行中…'}</span>
+              <span class="process-chev">▶</span>
+            </button>
+            <Show when={processOpen()}>
+              <div class="process-body">
+                <For each={processBlocks()}>
+                  {(block, index) => {
+                    if (block.kind === 'reasoning') {
+                      return (
+                        <ReasoningBlock
+                          text={block.text}
+                          ms={block.ms}
+                          stateKey={`${props.msg.id}:${index()}`}
+                        />
+                      )
+                    }
+                    if (block.kind === 'tool') {
+                      return <ToolCard name={block.name} state={block.state} time={block.time} />
+                    }
+                    return <div class="process-text">{block.text}</div>
+                  }}
+                </For>
+              </div>
+            </Show>
+          </div>
+        </Show>
         <Show when={split().answer}>
-          <div class="answer-bubble">
-            <div class="answer" ref={answerRef} innerHTML={answerHtml()} />
+          <div class="answer-bubble" classList={{ 'answer-bubble-mid': !props.final }}>
+            <div class="answer" ref={answerRef} innerHTML={answerHtml()} onClick={onAnswerClick} />
           </div>
         </Show>
       </div>

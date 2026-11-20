@@ -10,4 +10,7 @@ contextBridge.exposeInMainWorld('opencode', {
   getEndpoint: (): Promise<OpenCodeEndpoint> => ipcRenderer.invoke('opencode:endpoint'),
   pickDirectory: (defaultPath?: string): Promise<string | null> =>
     ipcRenderer.invoke('opencode:pick-directory', defaultPath),
+  openExternal: (url: string): Promise<void> => ipcRenderer.invoke('opencode:open-external', url),
+  openPath: (path: string): Promise<void> => ipcRenderer.invoke('opencode:open-path', path),
+  previewHtml: (html: string): Promise<void> => ipcRenderer.invoke('opencode:preview-html', html),
 })

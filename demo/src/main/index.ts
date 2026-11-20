@@ -1,5 +1,5 @@
-import { app, BrowserWindow, dialog, ipcMain, session, type OpenDialogOptions } from 'electron'
-import { appendFileSync, cpSync, existsSync, mkdirSync } from 'node:fs'
+import { app, BrowserWindow, dialog, ipcMain, session, shell, type OpenDialogOptions } from 'electron'
+import { appendFileSync, cpSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { Service } from '@opencode/client/service'
 
@@ -131,6 +131,26 @@ ipcMain.handle('opencode:pick-directory', async (_event, defaultPath?: string) =
     : await dialog.showOpenDialog(options)
   if (result.canceled) return null
   return result.filePaths[0] ?? null
+})
+
+// 用系统浏览器打开链接
+ipcMain.handle('opencode:open-external', async (_event, url: string) => {
+  if (!/^https?:\/\//i.test(url)) return
+  await shell.openExternal(url)
+})
+
+// 用系统程序打开本地文件
+ipcMain.handle('opencode:open-path', async (_event, path: string) => {
+  if (!path) return
+  await shell.openPath(path)
+})
+
+// 预览 HTML：写入临时文件后用系统浏览器打开
+ipcMain.handle('opencode:preview-html', async (_event, html: string) => {
+  if (typeof html !== 'string' || !html.trim()) return
+  const file = join(app.getPath('temp'), 'opencode-dui-preview.html')
+  writeFileSync(file, html, 'utf8')
+  await shell.openPath(file)
 })
 
 app.whenReady().then(() => {

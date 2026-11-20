@@ -3,6 +3,7 @@ import { OpenCode } from '@opencode/client'
 import Message from './components/Message'
 import ModelPicker from './components/ModelPicker'
 import FormComposer, { type FormInfo } from './components/FormComposer'
+import { toBlocks, type Block } from './lib/blocks'
 
 type Session = {
   id: string
@@ -28,6 +29,13 @@ type PermissionRequest = {
   action: string
   resources?: string[]
   message?: string
+}
+
+type Attachment = {
+  id: string
+  name: string
+  dataUrl: string
+  type: string
 }
 
 type WorkspaceGroup = {
@@ -125,6 +133,9 @@ export default function App() {
   const [models, setModels] = createSignal<Model[]>([])
   const [pickerOpen, setPickerOpen] = createSignal(false)
   const [input, setInput] = createSignal('')
+  const [attachments, setAttachments] = createSignal<Attachment[]>([])
+  const [lastSentImages, setLastSentImages] = createSignal<string[]>([])
+  const [previewImage, setPreviewImage] = createSignal<string | null>(null)
   const [sending, setSending] = createSignal(false)
   // 正在运行的会话表，值为 true 表示该会话占用执行
   const [running, setRunning] = createSignal<Record<string, true>>({})
@@ -166,6 +177,8 @@ export default function App() {
   // agent 提问
   const [forms, setForms] = createSignal<FormInfo[]>([])
   const [submittingForm, setSubmittingForm] = createSignal(false)
+  // 本地记录的回答，插入消息流显示
+  const [localMessages, setLocalMessages] = createSignal<any[]>([])
   // 归档全部删除
   const [confirmDeleteAll, setConfirmDeleteAll] = createSignal(false)
   const [deletingAll, setDeletingAll] = createSignal(false)
@@ -209,8 +222,57 @@ export default function App() {
     return undefined
   })
 
+  // 每轮提问的中间过程合并到该轮最后一条 assistant 上
+  const turns = createMemo(() => {
+    const map = new Map<string, Block[]>()
+    const list = messages()
+    let current: any[] = []
+
+    const flush = () => {
+      if (!current.length) return
+      const last = current[current.length - 1]
+      const blocks: Block[] = []
+      for (let i = 0; i < current.length; i++) {
+        const message = current[i]
+        const messageBlocks = toBlocks(message.content)
+        if (i === current.length - 1) {
+          // 最后一条：文本作为最终回答，其余进折叠区
+          for (const block of messageBlocks) {
+            if (block.kind !== 'text') blocks.push(block)
+          }
+        } else {
+          // 中间消息：所有内容都收进折叠区
+          blocks.push(...messageBlocks)
+        }
+      }
+      map.set(last.id, blocks)
+      current = []
+    }
+
+    for (const message of list) {
+      if (message?.type === 'user') {
+        flush()
+        continue
+      }
+      if (message?.type === 'assistant') current.push(message)
+    }
+    flush()
+    return map
+  })
+
   // 当前待回答的提问
   const activeForm = createMemo(() => forms()[0])
+
+  // 消息流里额外插入的本地记录，插到对应提问消息之后
+  const allMessages = createMemo(() => {
+    const list = [...messages()]
+    for (const local of localMessages()) {
+      const index = list.findIndex((item) => item?.id === local.afterMessageId)
+      if (index >= 0) list.splice(index + 1, 0, local)
+      else list.push(local)
+    }
+    return list
+  })
 
   // 工作目录 → 会话的两级分组
   const workspaceGroups = createMemo<WorkspaceGroup[]>(() => {
@@ -242,7 +304,8 @@ export default function App() {
       ensure(directory).sessions.push(session)
     }
 
-    const list = [...groups.values()]
+    // 只显示有会话的目录，空目录不占位置
+    const list = [...groups.values()].filter((group) => group.sessions.length > 0)
     for (const group of list) {
       group.sessions.sort((a, b) => (b.time?.updated ?? 0) - (a.time?.updated ?? 0))
     }
@@ -541,7 +604,10 @@ export default function App() {
       setRemovedWorkspaces(nextRemoved)
       saveRemoved(nextRemoved)
     }
-    expandWorkspace(picked)
+
+    // 新目录直接建一个会话，避免空目录留在侧边栏
+    if (!exists) await createSession(picked)
+    else expandWorkspace(picked)
   }
 
   /** 标记某个会话的运行状态 */
@@ -616,12 +682,25 @@ export default function App() {
       setActiveId(id)
       setMessages([])
       setOlderCursor(null)
+      setLocalMessages([])
+      setLastSentImages([])
     }
     setInterruptNotice(null)
     const directory = sessions().find((session) => session.id === id)?.location?.directory
     if (directory) expandWorkspace(directory)
     await refreshMessages(true)
     await refreshForms()
+  }
+
+  /** 启动时只展开当前会话所在目录 */
+  function collapseAllExcept(directory: string) {
+    const current = directory.toLowerCase()
+    const next: Record<string, true> = {}
+    for (const group of workspaceGroups()) {
+      if (group.orphan) continue
+      if (group.directory.toLowerCase() !== current) next[group.directory.toLowerCase()] = true
+    }
+    setCollapsed(next)
   }
 
   function scheduleReload() {
@@ -694,7 +773,10 @@ export default function App() {
           setProjects(dirs)
         })
         .catch(() => {})
-      if (res.data?.[0]) await openSession(res.data[0].id)
+      if (res.data?.[0]) {
+        await openSession(res.data[0].id)
+        collapseAllExcept(res.data[0].location?.directory ?? '')
+      }
       await refreshActiveSessions()
       await refreshPermissions()
       await refreshForms()
@@ -703,6 +785,7 @@ export default function App() {
       pollTimer = setInterval(() => {
         void refreshPermissions()
         void refreshForms()
+        void refreshSessions()
       }, 2500)
     } catch (error) {
       setErrorText(error instanceof Error ? error.message : String(error))
@@ -929,6 +1012,26 @@ export default function App() {
     setSubmittingForm(true)
     try {
       await client.session.form.reply({ sessionID, formID: form.id, answer })
+      // 在消息流里记一条回答
+      const summary = form.fields
+        .filter((field) => !field.hidden && field.type !== 'external')
+        .map((field) => {
+          const value = answer[field.key]
+          const text = Array.isArray(value) ? value.join('、') : String(value ?? '')
+          return text ? `${field.title ?? field.key}：${text}` : ''
+        })
+        .filter(Boolean)
+        .join('；')
+      setLocalMessages((prev) => [
+        ...prev,
+        {
+          id: `local-${Date.now()}`,
+          type: 'user',
+          text: `你回答了：${summary || '（空）'}`,
+          local: true,
+          afterMessageId: (form as any).metadata?.tool?.messageID,
+        },
+      ])
       await refreshForms()
     } catch (error) {
       showError(error)
@@ -1111,23 +1214,70 @@ export default function App() {
     })
   }
 
+  /** 读取图片文件为附件 */
+  function addImageFiles(files: FileList | File[]) {
+    for (const file of Array.from(files)) {
+      if (!/^image\/(png|jpeg|webp)$/.test(file.type)) continue
+      const reader = new FileReader()
+      reader.onload = () => {
+        const dataUrl = String(reader.result ?? '')
+        if (!dataUrl) return
+        setAttachments((prev) => [
+          ...prev,
+          {
+            id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            name: file.name || 'image.png',
+            dataUrl,
+            type: file.type,
+          },
+        ])
+      }
+      reader.readAsDataURL(file)
+    }
+  }
+
+  function removeAttachment(id: string) {
+    setAttachments((prev) => prev.filter((item) => item.id !== id))
+  }
+
+  /** 粘贴图片 */
+  function onComposerPaste(event: ClipboardEvent) {
+    const files = event.clipboardData?.files
+    if (files && files.length) {
+      event.preventDefault()
+      addImageFiles(files)
+    }
+  }
+
+  /** 拖入图片 */
+  function onComposerDrop(event: DragEvent) {
+    event.preventDefault()
+    const files = event.dataTransfer?.files
+    if (files && files.length) addImageFiles(files)
+  }
+
   async function send() {
     const text = input().trim()
     const id = activeId()
-    if (!text || !id || sending()) return
+    if ((!text && !attachments().length) || !id || sending()) return
+    const files = attachments().map((item) => ({ uri: item.dataUrl, name: item.name }))
+    const snapshot = attachments()
     setSending(true)
     setInput('')
+    setAttachments([])
     setInterruptNotice(null)
     try {
-      await client.session.prompt({ sessionID: id, text })
+      await client.session.prompt({ sessionID: id, text, ...(files.length ? { files } : {}) })
       // prompt 只是入队，先乐观置忙，后续事件再校准
       setSessionRunning(id, true)
       setErrorBanner(null)
+      setLastSentImages(snapshot.map((item) => item.dataUrl))
       await refreshMessages()
     } catch (error) {
       setSessionRunning(id, false)
       showError(error)
       setInput(text)
+      setAttachments(snapshot)
     } finally {
       setSending(false)
     }
@@ -1333,13 +1483,21 @@ export default function App() {
 
         <Show when={phase() === 'ready'}>
           <div class="messages" ref={scroller} onScroll={onMessagesScroll}>
-            <For each={messages()}>
+            <For each={allMessages()}>
               {(msg, index) => (
                 <Message
                   msg={msg}
                   index={index()}
                   canRevert={msg?.type === 'user' && msg?.id === lastUserMessage()?.id}
                   onRevert={requestRevert}
+                  final={msg?.type === 'assistant' && turns().has(msg.id)}
+                  process={msg?.type === 'assistant' ? turns().get(msg.id) : undefined}
+                  images={
+                    msg?.type === 'user' && msg?.id === lastUserMessage()?.id
+                      ? lastSentImages()
+                      : undefined
+                  }
+                  onPreviewImage={setPreviewImage}
                 />
               )}
             </For>
@@ -1407,12 +1565,35 @@ export default function App() {
           </Show>
 
           <Show when={!activeForm()}>
-            <div class="composer">
+            <div class="composer" onDragOver={(event) => event.preventDefault()} onDrop={onComposerDrop}>
+              <Show when={attachments().length > 0}>
+                <div class="composer-attachments">
+                  <For each={attachments()}>
+                    {(item) => (
+                      <div class="attachment">
+                        <img
+                          src={item.dataUrl}
+                          alt={item.name}
+                          onClick={() => setPreviewImage(item.dataUrl)}
+                        />
+                        <button
+                          class="attachment-remove"
+                          title="移除"
+                          onClick={() => removeAttachment(item.id)}
+                        >
+                          ×
+                        </button>
+                      </div>
+                    )}
+                  </For>
+                </div>
+              </Show>
               <textarea
                 value={input()}
-                placeholder="发消息…（Enter 发送，Shift+Enter 换行）"
+                placeholder="发消息…（Enter 发送，Shift+Enter 换行；可粘贴或拖入图片）"
                 onInput={(event) => setInput(event.currentTarget.value)}
                 onKeyDown={onComposerKeyDown}
+                onPaste={onComposerPaste}
               />
               <div class="composer-bar">
                 <div class="composer-info">
@@ -1593,6 +1774,11 @@ export default function App() {
             </div>
           </div>
         )}
+      </Show>
+      <Show when={previewImage()}>
+        <div class="image-lightbox" onClick={() => setPreviewImage(null)}>
+          <img src={previewImage() ?? ''} alt="预览" />
+        </div>
       </Show>
     </div>
   )
