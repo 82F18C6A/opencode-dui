@@ -179,6 +179,15 @@ export default function App() {
   const [submittingForm, setSubmittingForm] = createSignal(false)
   // 本地记录的回答，插入消息流显示
   const [localMessages, setLocalMessages] = createSignal<any[]>([])
+  // 官方 opencode 更新提示
+  const [updateInfo, setUpdateInfo] = createSignal<{
+    current: string
+    latest: string
+    url: string
+    sha256: string
+  } | null>(null)
+  const [updatingUpdate, setUpdatingUpdate] = createSignal(false)
+  const [updateProgress, setUpdateProgress] = createSignal(0)
   // 归档全部删除
   const [confirmDeleteAll, setConfirmDeleteAll] = createSignal(false)
   const [deletingAll, setDeletingAll] = createSignal(false)
@@ -730,6 +739,22 @@ export default function App() {
     }
   }
 
+  /** 下载官方安装包并启动安装 */
+  async function installUpdate() {
+    const info = updateInfo()
+    if (!info || updatingUpdate()) return
+    setUpdatingUpdate(true)
+    setUpdateProgress(0)
+    try {
+      await window.opencode.downloadUpdate(info.url, info.sha256)
+      setUpdateInfo(null)
+    } catch (error) {
+      showError(error)
+    } finally {
+      setUpdatingUpdate(false)
+    }
+  }
+
   /** 启动重试倒计时 */
   function startRetryTimer() {
     clearInterval(retryTimer)
@@ -782,6 +807,13 @@ export default function App() {
       await refreshForms()
       setPhase('ready')
       void subscribe()
+      onCleanup(window.opencode.onDownloadProgress((percent) => setUpdateProgress(percent)))
+      void window.opencode
+        .checkUpdate()
+        .then((info) => {
+          if (info) setUpdateInfo(info)
+        })
+        .catch(() => {})
       pollTimer = setInterval(() => {
         void refreshPermissions()
         void refreshForms()
@@ -1472,6 +1504,37 @@ export default function App() {
             <span class="topbar-dir">{activeSession()?.location?.directory ?? ''}</span>
           </Show>
         </header>
+
+        <Show when={updateInfo()}>
+          {(info) => (
+            <div class="update-banner">
+              <span class="update-text">
+                官方 opencode 有新版 {info().latest}（当前 {info().current}）
+              </span>
+              <Show when={updatingUpdate()}>
+                <div class="update-progress">
+                  <div class="update-progress-bar" style={{ width: `${updateProgress()}%` }} />
+                </div>
+                <span class="update-percent">{updateProgress()}%</span>
+              </Show>
+              <div class="update-actions">
+                <button
+                  class="update-primary"
+                  disabled={updatingUpdate()}
+                  onClick={() => void installUpdate()}
+                >
+                  {updatingUpdate() ? '下载中…' : '更新'}
+                </button>
+                <button class="update-ghost" onClick={() => void window.opencode.openUpdatePage()}>
+                  下载页
+                </button>
+                <button class="update-ghost" onClick={() => setUpdateInfo(null)}>
+                  忽略
+                </button>
+              </div>
+            </div>
+          )}
+        </Show>
 
         <Show when={phase() === 'loading'}>
           <div class="center muted">正在连接本地服务…</div>

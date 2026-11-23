@@ -1,6 +1,9 @@
 import { app, BrowserWindow, dialog, ipcMain, session, shell, type OpenDialogOptions } from 'electron'
-import { appendFileSync, cpSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { appendFileSync, cpSync, createWriteStream, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { dirname, join } from 'node:path'
+import { Readable, Transform } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
 import { Service } from '@opencode/client/service'
 
 /**
@@ -58,6 +61,105 @@ function resolveCli(): string {
     if (existsSync(candidate)) return candidate
   }
   throw new Error('找不到 opencode-cli.exe，请用 OPENCODE_CLI_PATH 指定路径')
+}
+
+// 官方桌面版更新接口
+const OFFICIAL_UPDATE_API = 'https://opencode.ai/update/api/latest/desktop/opencode/'
+const OFFICIAL_DOWNLOAD_PAGE = 'https://opencode.ai/download'
+
+type OfficialUpdate = {
+  current: string
+  latest: string
+  url: string
+  sha256: string
+}
+
+/** 读取 CLI 同目录的版本文件 */
+function readCliVersion(cliPath: string): string | null {
+  try {
+    return readFileSync(join(dirname(cliPath), 'opencode-cli.version'), 'utf8').trim()
+  } catch {
+    return null
+  }
+}
+
+/** 比较 x.y.z 版本号 */
+function compareVersions(a: string, b: string): number {
+  const left = a.split('.').map((part) => Number(part) || 0)
+  const right = b.split('.').map((part) => Number(part) || 0)
+  for (let i = 0; i < Math.max(left.length, right.length); i++) {
+    const diff = (left[i] ?? 0) - (right[i] ?? 0)
+    if (diff !== 0) return diff
+  }
+  return 0
+}
+
+/** 检查官方 opencode 是否有新版本 */
+async function checkOfficialUpdate(): Promise<OfficialUpdate | null> {
+  if (process.platform !== 'win32') return null
+  let cli: string
+  try {
+    cli = resolveCli()
+  } catch {
+    return null
+  }
+  const current = readCliVersion(cli)
+  if (!current) return null
+
+  try {
+    const response = await fetch(OFFICIAL_UPDATE_API)
+    if (!response.ok) return null
+    const data: any = await response.json()
+    const latest = String(data?.version ?? '')
+    const file = data?.metadata?.files?.['opencode-desktop-win-x64.exe']
+    if (!latest || !file?.url) return null
+    if (compareVersions(latest, current) <= 0) return null
+    return { current, latest, url: String(file.url), sha256: String(file.sha256 ?? '') }
+  } catch {
+    return null
+  }
+}
+
+/** 下载官方安装包，校验后启动安装程序 */
+async function downloadOfficialUpdate(
+  url: string,
+  sha256: string,
+  onProgress?: (percent: number) => void,
+): Promise<string> {
+  const target = join(app.getPath('temp'), 'opencode-update.exe')
+  const response = await fetch(url)
+  if (!response.ok || !response.body) throw new Error(`下载失败：${response.status}`)
+
+  const total = Number(response.headers.get('content-length') ?? 0)
+  let received = 0
+  let lastPercent = -1
+  let lastSentAt = 0
+  const hash = createHash('sha256')
+  const tap = new Transform({
+    transform(chunk, _encoding, callback) {
+      received += chunk.length
+      hash.update(chunk)
+      if (total > 0) {
+        const percent = Math.min(100, Math.floor((received / total) * 100))
+        const now = Date.now()
+        if (percent !== lastPercent && (percent === 100 || now - lastSentAt > 200)) {
+          lastPercent = percent
+          lastSentAt = now
+          onProgress?.(percent)
+        }
+      }
+      callback(null, chunk)
+    },
+  })
+  await pipeline(Readable.fromWeb(response.body as never), tap, createWriteStream(target))
+
+  if (sha256 && hash.digest('hex').toLowerCase() !== sha256.toLowerCase()) {
+    throw new Error('安装包校验失败')
+  }
+
+  onProgress?.(100)
+  await shell.openPath(target)
+  return target
 }
 
 /** 把 Service.headers 的返回值统一成普通对象 */
@@ -152,6 +254,19 @@ ipcMain.handle('opencode:preview-html', async (_event, html: string) => {
   writeFileSync(file, html, 'utf8')
   await shell.openPath(file)
 })
+
+// 检查官方 opencode 更新
+ipcMain.handle('opencode:check-update', () => checkOfficialUpdate())
+
+// 下载官方安装包并启动安装程序
+ipcMain.handle('opencode:download-update', (event, url: string, sha256: string) =>
+  downloadOfficialUpdate(url, sha256, (percent) => {
+    event.sender.send('opencode:download-progress', percent)
+  }),
+)
+
+// 打开官方下载页
+ipcMain.handle('opencode:open-update-page', () => shell.openExternal(OFFICIAL_DOWNLOAD_PAGE))
 
 app.whenReady().then(() => {
   log('[boot] app ready')
