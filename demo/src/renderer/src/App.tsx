@@ -1351,6 +1351,17 @@ export default function App() {
     if (files && files.length) addFiles(files)
   }
 
+  /** 右侧导航滚到顶部时加载更早的消息 */
+  async function onNavScroll(event: Event) {
+    const element = event.currentTarget as HTMLDivElement
+    if (element.scrollTop > 0 || loadingOlder() || !olderCursor()) return
+    const before = element.scrollHeight
+    await loadOlder()
+    requestAnimationFrame(() => {
+      element.scrollTop += element.scrollHeight - before
+    })
+  }
+
   /** 拖动输入框上边缘调整高度 */
   function startComposerResize(event: MouseEvent) {
     event.preventDefault()
@@ -1671,14 +1682,14 @@ export default function App() {
 
           <Show when={userPrompts().length}>
             <div class="nav-zone" onMouseEnter={revealCurrentPrompt}>
-              <div class="nav-ticks">
+              <div class="nav-ticks" onScroll={onNavScroll}>
                 <For each={userPrompts()}>
                   {(_, index) => (
                     <span class="nav-tick" classList={{ current: index() === currentPromptIndex() }} />
                   )}
                 </For>
               </div>
-              <div class="message-nav" ref={navPanel}>
+              <div class="message-nav" ref={navPanel} onScroll={onNavScroll}>
                 <For each={userPrompts()}>
                   {(prompt, index) => (
                     <button

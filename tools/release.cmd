@@ -13,9 +13,6 @@ set EXPORT_DIR=D:\Z_UserZYH\Projects\exports\opencode-dui
 set SRC_DIR=%EXPORT_DIR%\win-unpacked
 set DEST_DIR=D:\Softwares-self\opencode-dui
 
-rem Set to 0 to skip creating the desktop shortcut
-set CREATE_SHORTCUT=1
-
 rem Refuse to update while the app is running
 tasklist /FI "IMAGENAME eq opencode-dui.exe" 2>nul | find /I "opencode-dui.exe" >nul
 if not errorlevel 1 (
@@ -47,10 +44,6 @@ if errorlevel 8 (
   echo Copy failed. Make sure no file in the target folder is in use.
   pause
   exit /b 1
-)
-
-if "%CREATE_SHORTCUT%"=="1" (
-  powershell -NoProfile -ExecutionPolicy Bypass -Command "$s=(New-Object -ComObject WScript.Shell).CreateShortcut('%USERPROFILE%\Desktop\opencode-dui.lnk'); $s.TargetPath='%DEST_DIR%\opencode-dui.exe'; $s.WorkingDirectory='%DEST_DIR%'; $s.Save()"
 )
 
 for /f %%v in ('node -p "require('./package.json').version"') do set APP_VERSION=%%v
