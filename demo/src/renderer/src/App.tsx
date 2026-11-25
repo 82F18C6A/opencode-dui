@@ -33,9 +33,11 @@ type PermissionRequest = {
 
 type Attachment = {
   id: string
+  kind: 'image' | 'text'
   name: string
   dataUrl: string
   type: string
+  size: number
 }
 
 type WorkspaceGroup = {
@@ -45,6 +47,57 @@ type WorkspaceGroup = {
 }
 
 const WORKSPACE_KEY = 'opencode.workspaces'
+
+const COMPOSER_HEIGHT_KEY = 'opencode.composerHeight'
+
+const SIDEBAR_WIDTH_KEY = 'opencode.sidebarWidth'
+
+/** 读取侧边栏宽度 */
+function loadSidebarWidth(): number {
+  try {
+    const value = Number(localStorage.getItem(SIDEBAR_WIDTH_KEY))
+    if (Number.isFinite(value) && value >= 200) return Math.min(480, value)
+  } catch {
+    // 读不到时用默认宽度
+  }
+  return 264
+}
+
+/** 写回侧边栏宽度 */
+function saveSidebarWidth(value: number) {
+  try {
+    localStorage.setItem(SIDEBAR_WIDTH_KEY, String(value))
+  } catch {
+    // 写不进去时忽略
+  }
+}
+
+/** 格式化文件大小 */
+function formatSize(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`
+  return `${bytes} B`
+}
+
+/** 读取输入框高度 */
+function loadComposerHeight(): number {
+  try {
+    const value = Number(localStorage.getItem(COMPOSER_HEIGHT_KEY))
+    if (Number.isFinite(value) && value >= 58) return Math.min(360, value)
+  } catch {
+    // 读不到时用默认高度
+  }
+  return 58
+}
+
+/** 写回输入框高度 */
+function saveComposerHeight(value: number) {
+  try {
+    localStorage.setItem(COMPOSER_HEIGHT_KEY, String(value))
+  } catch {
+    // 写不进去时忽略
+  }
+}
 
 /** 读取本地登记的工作目录 */
 function loadWorkspaces(): string[] {
@@ -133,6 +186,8 @@ export default function App() {
   const [models, setModels] = createSignal<Model[]>([])
   const [pickerOpen, setPickerOpen] = createSignal(false)
   const [input, setInput] = createSignal('')
+  const [composerHeight, setComposerHeight] = createSignal(loadComposerHeight())
+  const [sidebarWidth, setSidebarWidth] = createSignal(loadSidebarWidth())
   const [attachments, setAttachments] = createSignal<Attachment[]>([])
   const [lastSentImages, setLastSentImages] = createSignal<string[]>([])
   const [previewImage, setPreviewImage] = createSignal<string | null>(null)
@@ -1246,21 +1301,29 @@ export default function App() {
     })
   }
 
-  /** 读取图片文件为附件 */
-  function addImageFiles(files: FileList | File[]) {
+  /** 读取图片或文本文件为附件 */
+  function addFiles(files: FileList | File[]) {
+    const textPattern = /\.(txt|md|json|log|csv|ya?ml|xml|ini|conf|ts|tsx|js|jsx|py|java|go|rs|css|html|sh|bat|ps1)$/i
     for (const file of Array.from(files)) {
-      if (!/^image\/(png|jpeg|webp)$/.test(file.type)) continue
+      const isImage = /^image\/(png|jpeg|webp)$/.test(file.type)
+      const isText = textPattern.test(file.name) && file.size <= 1024 * 1024
+      if (!isImage && !isText) continue
+
       const reader = new FileReader()
       reader.onload = () => {
-        const dataUrl = String(reader.result ?? '')
+        let dataUrl = String(reader.result ?? '')
         if (!dataUrl) return
+        // 文本文件统一按 text/plain 标记，避免服务端不识别空 MIME
+        if (isText) dataUrl = dataUrl.replace(/^data:[^;]*;base64,/, 'data:text/plain;base64,')
         setAttachments((prev) => [
           ...prev,
           {
             id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-            name: file.name || 'image.png',
+            kind: isImage ? 'image' : 'text',
+            name: file.name || (isImage ? 'image.png' : 'file.txt'),
             dataUrl,
-            type: file.type,
+            type: isImage ? file.type : 'text/plain',
+            size: file.size,
           },
         ])
       }
@@ -1272,20 +1335,56 @@ export default function App() {
     setAttachments((prev) => prev.filter((item) => item.id !== id))
   }
 
-  /** 粘贴图片 */
+  /** 粘贴图片或文本文件 */
   function onComposerPaste(event: ClipboardEvent) {
     const files = event.clipboardData?.files
     if (files && files.length) {
       event.preventDefault()
-      addImageFiles(files)
+      addFiles(files)
     }
   }
 
-  /** 拖入图片 */
+  /** 拖入图片或文本文件 */
   function onComposerDrop(event: DragEvent) {
     event.preventDefault()
     const files = event.dataTransfer?.files
-    if (files && files.length) addImageFiles(files)
+    if (files && files.length) addFiles(files)
+  }
+
+  /** 拖动输入框上边缘调整高度 */
+  function startComposerResize(event: MouseEvent) {
+    event.preventDefault()
+    const startY = event.clientY
+    const startHeight = composerHeight()
+    const onMove = (moveEvent: MouseEvent) => {
+      const next = Math.min(360, Math.max(58, startHeight + (startY - moveEvent.clientY)))
+      setComposerHeight(next)
+      saveComposerHeight(next)
+    }
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+  }
+
+  /** 拖动侧边栏右边缘调整宽度 */
+  function startSidebarResize(event: MouseEvent) {
+    event.preventDefault()
+    const startX = event.clientX
+    const startWidth = sidebarWidth()
+    const onMove = (moveEvent: MouseEvent) => {
+      const next = Math.min(480, Math.max(200, startWidth + (moveEvent.clientX - startX)))
+      setSidebarWidth(next)
+      saveSidebarWidth(next)
+    }
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
   }
 
   async function send() {
@@ -1371,7 +1470,8 @@ export default function App() {
 
   return (
     <div class="app">
-      <aside class="sidebar">
+      <aside class="sidebar" style={{ width: `${sidebarWidth()}px` }}>
+      <div class="sidebar-resize" onMouseDown={startSidebarResize} />
         <div class="brand">opencode</div>
         <button class="new-workspace" onClick={() => void addWorkspace()}>
           + 新建工作目录
@@ -1629,16 +1729,34 @@ export default function App() {
 
           <Show when={!activeForm()}>
             <div class="composer" onDragOver={(event) => event.preventDefault()} onDrop={onComposerDrop}>
+              <div
+                class="composer-resize"
+                title="拖动调整高度"
+                onMouseDown={startComposerResize}
+              />
               <Show when={attachments().length > 0}>
                 <div class="composer-attachments">
                   <For each={attachments()}>
                     {(item) => (
-                      <div class="attachment">
-                        <img
-                          src={item.dataUrl}
-                          alt={item.name}
-                          onClick={() => setPreviewImage(item.dataUrl)}
-                        />
+                      <div
+                        class="attachment"
+                        classList={{ 'attachment-text': item.kind === 'text' }}
+                      >
+                        <Show
+                          when={item.kind === 'image'}
+                          fallback={
+                            <div class="attachment-file" title={item.name}>
+                              <span class="attachment-file-name">{item.name}</span>
+                              <span class="attachment-file-size">{formatSize(item.size)}</span>
+                            </div>
+                          }
+                        >
+                          <img
+                            src={item.dataUrl}
+                            alt={item.name}
+                            onClick={() => setPreviewImage(item.dataUrl)}
+                          />
+                        </Show>
                         <button
                           class="attachment-remove"
                           title="移除"
@@ -1652,8 +1770,9 @@ export default function App() {
                 </div>
               </Show>
               <textarea
+                style={{ height: `${composerHeight()}px` }}
                 value={input()}
-                placeholder="发消息…（Enter 发送，Shift+Enter 换行；可粘贴或拖入图片）"
+                placeholder="发消息…（Enter 发送，Shift+Enter 换行；可粘贴或拖入图片/文本文件）"
                 onInput={(event) => setInput(event.currentTarget.value)}
                 onKeyDown={onComposerKeyDown}
                 onPaste={onComposerPaste}
