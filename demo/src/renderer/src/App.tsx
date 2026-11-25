@@ -79,6 +79,15 @@ function formatSize(bytes: number): string {
   return `${bytes} B`
 }
 
+/** 拼接消息内容里的文本，用于判断本地和服务端谁的更完整 */
+function joinTextContent(content: unknown): string {
+  if (!Array.isArray(content)) return ''
+  return content
+    .filter((block: any) => block?.type === 'text')
+    .map((block: any) => String(block.text ?? ''))
+    .join('\n\n')
+}
+
 /** 读取输入框高度 */
 function loadComposerHeight(): number {
   try {
@@ -455,7 +464,23 @@ export default function App() {
       const pending = prev.filter(
         (m) => m?.id && !known.has(m.id) && !olderIds.has(m.id) && m.type === 'assistant',
       )
-      return [...older, ...server, ...pending]
+      // 流式期间服务端消息可能不含完整文本，保留本地累积更多的版本
+      const localById = new Map(prev.map((m: any) => [m?.id, m]))
+      const merged = server.map((item: any) => {
+        const local: any = localById.get(item.id)
+        if (
+          local &&
+          item.type === 'assistant' &&
+          local.type === 'assistant' &&
+          !item.time?.completed &&
+          !local.time?.completed &&
+          joinTextContent(local.content).length > joinTextContent(item.content).length
+        ) {
+          return { ...item, content: local.content }
+        }
+        return item
+      })
+      return [...older, ...merged, ...pending]
     })
   }
 
