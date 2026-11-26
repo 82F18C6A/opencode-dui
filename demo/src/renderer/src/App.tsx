@@ -1009,8 +1009,27 @@ export default function App() {
 
   async function refreshSessions() {
     if (!client) return
+    // 重命名输入期间不刷新，避免列表重建导致输入框失焦
+    if (renamingId()) return
     const res = await client.session.list({ archived: false })
-    setSessions(res.data ?? [])
+    const next = res.data ?? []
+    setSessions((prev) => {
+      // 内容没变化时保留原数组，避免无谓重建
+      if (
+        prev.length === next.length &&
+        prev.every((session, index) => {
+          const other = next[index]
+          return (
+            session.id === other.id &&
+            session.title === other.title &&
+            session.time?.updated === other.time?.updated
+          )
+        })
+      ) {
+        return prev
+      }
+      return next
+    })
   }
 
   /** 归档会话，归档后从列表隐藏 */
@@ -1426,6 +1445,7 @@ export default function App() {
   async function send() {
     const text = input().trim()
     const id = activeId()
+    const running = isRunning()
     if ((!text && !attachments().length) || !id || sending()) return
     const files = attachments().map((item) => ({ uri: item.dataUrl, name: item.name }))
     const snapshot = attachments()
@@ -1434,14 +1454,20 @@ export default function App() {
     setAttachments([])
     setInterruptNotice(null)
     try {
-      await client.session.prompt({ sessionID: id, text, ...(files.length ? { files } : {}) })
+      await client.session.prompt({
+        sessionID: id,
+        text,
+        ...(files.length ? { files } : {}),
+        // 运行中的消息立即插进当前执行，等下一个回合边界生效
+        ...(running ? { delivery: 'steer' as const } : {}),
+      })
       // prompt 只是入队，先乐观置忙，后续事件再校准
-      setSessionRunning(id, true)
+      if (!running) setSessionRunning(id, true)
       setErrorBanner(null)
       setLastSentImages(snapshot.map((item) => item.dataUrl))
       await refreshMessages()
     } catch (error) {
-      setSessionRunning(id, false)
+      if (!running) setSessionRunning(id, false)
       showError(error)
       setInput(text)
       setAttachments(snapshot)
@@ -1828,27 +1854,32 @@ export default function App() {
                     </span>
                   </Show>
                 </div>
-                <button
-                  class="send"
-                  classList={{ stop: isRunning() }}
-                  title={isRunning() ? '停止' : '发送'}
-                  aria-label={isRunning() ? '停止' : '发送'}
-                  disabled={isRunning() ? interrupting() : sending() || !input().trim()}
-                  onClick={() => (isRunning() ? void interrupt() : void send())}
-                >
-                  <Show
-                    when={isRunning()}
-                    fallback={
-                      <svg class="send-icon" viewBox="0 0 24 24" aria-hidden="true">
-                        <path d="M12 19V5M6 11l6-6 6 6" />
+                <div class="composer-actions">
+                  <Show when={isRunning()}>
+                    <button
+                      class="stop-btn"
+                      title="停止"
+                      aria-label="停止"
+                      disabled={interrupting()}
+                      onClick={() => void interrupt()}
+                    >
+                      <svg class="stop-icon" viewBox="0 0 24 24" aria-hidden="true">
+                        <rect x="8" y="8" width="8" height="8" rx="1.5" />
                       </svg>
-                    }
+                    </button>
+                  </Show>
+                  <button
+                    class="send"
+                    title={isRunning() ? '追加' : '发送'}
+                    aria-label={isRunning() ? '追加' : '发送'}
+                    disabled={sending() || (!input().trim() && !attachments().length)}
+                    onClick={() => void send()}
                   >
                     <svg class="send-icon" viewBox="0 0 24 24" aria-hidden="true">
-                      <rect x="8" y="8" width="8" height="8" rx="1.5" />
+                      <path d="M12 19V5M6 11l6-6 6 6" />
                     </svg>
-                  </Show>
-                </button>
+                  </button>
+                </div>
               </div>
             </div>
           </Show>

@@ -1450,6 +1450,39 @@ button {
   cursor: default;
 }
 
+/* 运行中的停止按钮 */
+.composer-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.stop-btn {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: #d7dbe6;
+  color: #4b5563;
+}
+
+.stop-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.stop-icon {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+}
+
 /* 运行中的停止键 */
 .send.stop {
   background: #d7dbe6;
