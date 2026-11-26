@@ -213,8 +213,12 @@ function AssistantMessage(props: {
   const [processOpen, setProcessOpen] = createSignal(!turnDone())
 
   createEffect(() => {
-    // 整轮结束后自动折叠中间步骤
-    if (turnDone()) setProcessOpen(false)
+    if (!turnDone()) return
+    // 用户手动展开着思考块时，整轮结束也不自动折叠
+    const keepsOpen = processBlocks().some(
+      (block) => block.kind === 'reasoning' && Boolean(block.key) && reasoningOpen.get(block.key!),
+    )
+    if (!keepsOpen) setProcessOpen(false)
   })
 
   let answerRef: HTMLDivElement | undefined
@@ -298,7 +302,7 @@ function AssistantMessage(props: {
                         <ReasoningBlock
                           text={block.text}
                           ms={block.ms}
-                          stateKey={`${props.msg.id}:${index()}`}
+                          stateKey={block.key ?? `${props.msg.id}:${index()}`}
                         />
                       )
                     }

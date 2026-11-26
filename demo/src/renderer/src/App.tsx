@@ -308,6 +308,10 @@ export default function App() {
       for (let i = 0; i < current.length; i++) {
         const message = current[i]
         const messageBlocks = toBlocks(message.content)
+        // 给块挂上稳定 key，流式刷新时不重建思考块的展开状态
+        for (let j = 0; j < messageBlocks.length; j++) {
+          messageBlocks[j].key = `${message.id}:${j}`
+        }
         if (i === current.length - 1) {
           // 最后一条：文本作为最终回答，其余进折叠区
           for (const block of messageBlocks) {
@@ -1496,10 +1500,18 @@ export default function App() {
   }
 
   function onComposerKeyDown(event: KeyboardEvent) {
-    if (event.key === 'Enter' && !event.shiftKey) {
+    if (event.key !== 'Enter') return
+    // Ctrl / Cmd + Enter 发送
+    if (event.ctrlKey || event.metaKey) {
       event.preventDefault()
       void send()
+      return
     }
+    if (event.shiftKey) return
+    // 输入法组合中的回车交给输入法
+    if (event.isComposing) return
+    event.preventDefault()
+    void send()
   }
 
   // 内容变化时跟随底部，但用户往上翻时不打扰

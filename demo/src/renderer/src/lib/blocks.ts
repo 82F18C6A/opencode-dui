@@ -1,8 +1,8 @@
 // 把 assistant 消息的 content 数组归并成可渲染的块
 export type Block =
-  | { kind: 'text'; text: string }
-  | { kind: 'reasoning'; text: string; ms?: number }
-  | { kind: 'tool'; id: string; name: string; state: unknown; time?: unknown }
+  | { kind: 'text'; text: string; key?: string }
+  | { kind: 'reasoning'; text: string; ms?: number; key?: string }
+  | { kind: 'tool'; id: string; name: string; state: unknown; time?: unknown; key?: string }
 
 export function toBlocks(content: readonly unknown[] | undefined): Block[] {
   const out: Block[] = []
