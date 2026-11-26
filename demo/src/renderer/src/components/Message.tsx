@@ -135,6 +135,7 @@ export default function Message(props: {
   onRevert?: (id: string) => void
   final?: boolean
   process?: Block[]
+  running?: boolean
   images?: string[]
   onPreviewImage?: (url: string) => void
 }) {
@@ -145,7 +146,7 @@ export default function Message(props: {
       when={msg().type === 'user'}
       fallback={
         props.final ? (
-          <AssistantMessage msg={msg()} final process={props.process} />
+          <AssistantMessage msg={msg()} final process={props.process} running={props.running} />
         ) : null
       }
     >
@@ -194,23 +195,26 @@ function AssistantMessage(props: {
   msg: any
   final?: boolean
   process?: Block[]
+  running?: boolean
 }) {
   const blocks = createMemo(() => toBlocks(props.msg?.content))
   const split = createMemo(() => splitBlocks(blocks()))
   const answerHtml = createMemo(() => (split().answer ? renderMarkdown(split().answer) : ''))
   const processBlocks = createMemo(() => props.process ?? split().process)
   const completed = createMemo(() => typeof props.msg?.time?.completed === 'number')
+  // 整轮结束才算完成：会话不再运行、消息已完成、并且是该轮最后一条
+  const turnDone = createMemo(() => completed() && Boolean(props.final) && !props.running)
   const duration = createMemo(() => {
     const created = props.msg?.time?.created
     const completedAt = props.msg?.time?.completed
     if (typeof created !== 'number' || typeof completedAt !== 'number') return null
     return Math.max(1, Math.round((completedAt - created) / 1000))
   })
-  const [processOpen, setProcessOpen] = createSignal(!completed())
+  const [processOpen, setProcessOpen] = createSignal(!turnDone())
 
   createEffect(() => {
-    // 回答输出完后自动折叠中间步骤
-    if (completed()) setProcessOpen(false)
+    // 整轮结束后自动折叠中间步骤
+    if (turnDone()) setProcessOpen(false)
   })
 
   let answerRef: HTMLDivElement | undefined
@@ -281,8 +285,8 @@ function AssistantMessage(props: {
         <Show when={processBlocks().length > 0}>
           <div class="process" data-open={processOpen()}>
             <button class="process-head" onClick={() => setProcessOpen(!processOpen())}>
-              <span class="process-dot" classList={{ done: completed() }} />
-              <span>{completed() && props.final ? `已完成${duration() !== null ? `，用时 ${duration()} 秒` : ''}` : completed() ? '中间过程' : '执行中…'}</span>
+              <span class="process-dot" classList={{ done: turnDone() }} />
+              <span>{turnDone() ? `已完成${duration() !== null ? `，用时 ${duration()} 秒` : ''}` : '执行中…'}</span>
               <span class="process-chev">▶</span>
             </button>
             <Show when={processOpen()}>

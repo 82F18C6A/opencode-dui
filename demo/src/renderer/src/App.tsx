@@ -1691,6 +1691,7 @@ export default function App() {
                   onRevert={requestRevert}
                   final={msg?.type === 'assistant' && turns().has(msg.id)}
                   process={msg?.type === 'assistant' ? turns().get(msg.id) : undefined}
+                  running={isRunning()}
                   images={
                     msg?.type === 'user' && msg?.id === lastUserMessage()?.id
                       ? lastSentImages()
