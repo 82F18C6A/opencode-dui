@@ -706,8 +706,11 @@ export default function App() {
       saveRemoved(nextRemoved)
     }
 
-    // 新目录直接建一个会话，避免空目录留在侧边栏
-    if (!exists) await createSession(picked)
+    // 目录没有会话时直接建一个，避免空目录被隐藏后看起来没反应
+    const hasSession = sessions().some(
+      (session) => session.location?.directory?.toLowerCase() === key,
+    )
+    if (!hasSession) await createSession(picked)
     else expandWorkspace(picked)
   }
 
