@@ -295,7 +295,15 @@ export default function App() {
     return undefined
   })
 
-  // 每轮提问的中间过程合并到该轮最后一条 assistant 上
+  // 每轮的最后一条 assistant，只有它是最终回答
+  // 当前轮的最后一条，用来决定是否显示「执行中」
+  const currentTurnFinalId = createMemo(() => {
+    const list = messages()
+    for (let i = list.length - 1; i >= 0; i--) {
+      if (list[i]?.type === 'assistant') return list[i].id
+    }
+    return null
+  })
   const turns = createMemo(() => {
     const map = new Map<string, Block[]>()
     const list = messages()
@@ -1729,7 +1737,7 @@ export default function App() {
                   onRevert={requestRevert}
                   final={msg?.type === 'assistant' && turns().has(msg.id)}
                   process={msg?.type === 'assistant' ? turns().get(msg.id) : undefined}
-                  running={isRunning()}
+                  running={msg?.id === currentTurnFinalId() ? isRunning() : false}
                   images={
                     msg?.type === 'user' && msg?.id === lastUserMessage()?.id
                       ? lastSentImages()
